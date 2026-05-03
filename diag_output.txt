@@ -1,0 +1,7 @@
+=== ADHD App Diagnostics === 
+ 
+Node version: 
+v24.15.0
+ 
+npm version: 
+11.12.1
