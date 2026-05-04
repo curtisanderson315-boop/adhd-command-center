@@ -18,48 +18,44 @@
       "infoPlist": {
         "NSSpeechRecognitionUsageDescription": "ADHD Command Center uses speech recognition to capture your thoughts via voice.",
         "NSMicrophoneUsageDescription": "ADHD Command Center needs microphone access to capture voice input.",
-        "UIBackgroundModes": [
-          "remote-notification"
-        ],
-        "ITSAppUsesNonExemptEncryption": false
+        "UIBackgroundModes": ["remote-notification"],
+        "ITSAppUsesNonExemptEncryption": false,
+        "CFBundleURLTypes": [
+          {
+            "CFBundleTypeRole": "Editor",
+            "CFBundleURLSchemes": [
+              "adhdcommandcenter",
+              "com.googleusercontent.apps.82226617367-kc7m6pnqrv29qjk0l0prn8jri4kuqo6g"
+            ]
+          }
+        ]
       },
       "entitlements": {
         "com.apple.developer.siri": true
       }
     },
     "android": {
+      "package": "com.curtisanderson.adhdcommandcenter",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#1a1a2e"
       },
-      "permissions": [
-        "RECORD_AUDIO",
-        "RECEIVE_BOOT_COMPLETED",
-        "VIBRATE"
-      ]
+      "permissions": ["RECORD_AUDIO", "RECEIVE_BOOT_COMPLETED", "VIBRATE"]
     },
     "web": {
       "bundler": "metro",
       "output": "single",
       "favicon": "./assets/favicon.png"
     },
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "plugins": [
       "expo-dev-client",
       "expo-secure-store",
       "expo-background-task",
-      [
-        "expo-notifications",
-        {
-          "icon": "./assets/notification-icon.png",
-          "color": "#6c63ff"
-        }
-      ]
+      ["expo-notifications", {"icon": "./assets/notification-icon.png", "color": "#6c63ff"}]
     ],
     "extra": {
-      "eas": {
-        "projectId": "1af8df19-af7b-493c-ad94-7bb4b3d85075"
-      }
+      "eas": {"projectId": "1af8df19-af7b-493c-ad94-7bb4b3d85075"}
     }
   }
 }

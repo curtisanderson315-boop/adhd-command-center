@@ -58,6 +58,7 @@ export function SettingsScreen() {
   const [userEmail, setUserEmail] = useState('');
 
   const { request, response, promptAsync } = useGoogleAuth();
+  console.log('[Settings] OAuth request ready:', !!request);
 
   useEffect(() => {
     (async () => {
@@ -70,7 +71,9 @@ export function SettingsScreen() {
 
   // Handle OAuth response
   useEffect(() => {
-    if (response?.type === 'success') {
+    if (!response) return;
+
+    if (response.type === 'success') {
       const { code } = response.params;
       const verifier = request?.codeVerifier ?? '';
       exchangeCodeForTokens(code, verifier)
@@ -85,7 +88,26 @@ export function SettingsScreen() {
           setUserEmail(email);
           Alert.alert('Connected!', `Signed in as ${email}`);
         })
-        .catch((e) => Alert.alert('Sign-in failed', e.message));
+        .catch((e) => {
+          console.error('[Settings] Token exchange error:', e?.message ?? e);
+          Alert.alert('Sign-in failed', e?.message ?? 'Unknown error. Check your network and try again.');
+        });
+    } else if (response.type === 'error') {
+      // Capture the real Google error for diagnosis
+      const code = (response as any).error?.code
+        ?? (response as any).params?.error
+        ?? 'unknown_error';
+      const description = (response as any).params?.error_description
+        ?? (response as any).error?.message
+        ?? '';
+      console.error('[Settings] OAuth error:', code, description);
+      Alert.alert(
+        'Sign-in failed',
+        description || `Google returned an error: ${code}. Make sure you have a network connection and try again.`
+      );
+    } else if (response.type === 'dismiss') {
+      // User cancelled -- no alert needed
+      console.log('[Settings] OAuth dismissed by user');
     }
   }, [response]);
 
@@ -184,7 +206,15 @@ export function SettingsScreen() {
           ) : (
             <TouchableOpacity
               style={styles.googleBtn}
-              onPress={() => promptAsync()}
+              onPress={() => {
+                console.log('[Settings] promptAsync called');
+                promptAsync()
+                  .then((result) => console.log('[Settings] promptAsync result:', JSON.stringify(result)))
+                  .catch((e) => {
+                    console.error('[Settings] promptAsync error:', e?.message ?? e);
+                    Alert.alert('Sign-in error', e?.message ?? 'Unknown error');
+                  });
+              }}
               disabled={!request}
             >
               <Text style={styles.googleBtnText}>Connect Gmail + Calendar</Text>
