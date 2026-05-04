@@ -76,3 +76,65 @@ Every session appends a new entry here. Curtis can read this to know what happen
    - Add a Notes tab or surface notes inside Home.
 
 ---
+
+## 2026-05-03 — Verification + TS cleanup
+
+### Completed
+- Verified all phases 1-5 are wired and intact (CaptureBar, HomeScreen routing, SettingsScreen, TriageScreen, TasksScreen, background polling).
+- Confirmed the latest EAS development build (`049cdfc8-833c-40d3-adae-4553e755f01d`, commit `edb3b6af`) finished successfully — IPA artifact is live at the Expo dashboard, ready to install.
+- Removed dead `discovery` const in `src/services/auth.ts` that was triggering TS2774 ("condition will always return true") because `useAutoDiscovery` was being used as a value rather than called as a hook. The actual auth flow inlines the discovery endpoints inside `useAuthRequest`, so the const was unreferenced. `npx tsc --noEmit` now reports zero errors.
+
+### Decisions Made
+- **Decision:** Did not add OpenAI Whisper integration this session. **Reason:** That belongs in the "If device testing works, optional follow-up" bucket — it requires a second API key from Curtis, and the iOS keyboard dictation fallback gives a usable voice-to-text path today. Easy to add later through the existing `transcribeAudio` seam.
+- **Decision:** Did not commit untracked project files (CLAUDE.md, AUTONOMOUS_PROMPT.md, HANDOFF.md, assets/, .claude/) this session. **Reason:** They were left untracked across multiple previous sessions and may be intentionally gitignored or local-only. Out of scope to relitigate without a clear ask.
+
+### Blockers
+- None new. Previously logged blockers (Anthropic audio API, iOS background-fetch interval clamping) still stand.
+
+### Next Session Should Start With
+- Curtis: install the latest EAS IPA on the iPhone and run through the smoke-test list above.
+- If something breaks on device, capture the error and start a session focused on that crash.
+- If everything works, the natural next feature is Whisper-powered transcription (single edit point: `transcribeAudio` in `src/services/ai.ts`).
+
+## SESSION COMPLETE
+
+### What was built
+The full app is implemented across all 5 phases:
+
+- **Voice capture (Phase 1):** Hold-to-record audio via `expo-av`, pulsing recording indicator, mic permission prompt, automatic fallback to a text input (which on iOS supports built-in keyboard dictation). After processing, the AI's `confirmationText` is read aloud via `expo-speech`.
+- **AI routing (Phase 1):** All four action types (`gmail_draft`, `calendar_event`, `task`, `note`) are wired end-to-end. Routed captures show their destination ("Gmail draft saved", "Added to Calendar", etc.) and flip to status `routed`.
+- **Settings (Phase 2):** Anthropic key entry with masking + a real "Test connection" Haiku ping. Google connect/disconnect via `expo-auth-session`. Notifications toggle that requests iOS permission. Auto-check interval picker (5m / 15m / 30m / Manual).
+- **Triage (Phase 3):** Gmail fetch on focus + pull-to-refresh, AI triage of unread messages, single-card-with-swipe UX (left = archive, right = mark as read), suggested-action buttons (reply/calendar/task/archive/snooze), local-notification-based snooze.
+- **Tasks (Phase 4):** Three buckets (Today / Upcoming / Someday) with badge counts, swipe-to-complete, swipe-to-delete, "+" header opens a quick-add modal with bucket picker and tap-to-cycle priority. Sorted: incomplete first, high → low priority, then newest.
+- **Background polling (Phase 5):** `ADHD_EMAIL_POLL` task defined at module scope, registered/unregistered as the user changes interval. Persists triaged queue to AsyncStorage so it survives a cold launch. Local notification when urgent items appear; tapping the notification jumps to the Triage tab.
+
+### What's still remaining and why
+- **True audio transcription:** `transcribeAudio()` returns `null` and the UI gracefully falls through to a text input. Anthropic's API has no audio endpoint, and adding OpenAI Whisper would require a second API key from Curtis. Single seam — easy to swap in later.
+- **Settings: surface the userEmail or Notes tab:** Captured notes are stored but only visible if AI routes a capture as `note`; there is no dedicated Notes view yet. Low priority.
+- **Reanimated layout animations on completed items:** Currently scale + opacity. Could add a layout-shift animation when a task moves to the bottom of its bucket, but the swipe gesture already feels responsive.
+
+### Exactly what Curtis should do next
+1. **Install the build on your iPhone.**
+   - Open https://expo.dev/accounts/ander315/projects/adhd-command-center/builds on your phone (or scan the QR code from the dashboard).
+   - Tap the latest finished iOS build (commit `edb3b6af`, May 4) → Install. iOS will prompt to trust the developer profile under Settings → General → VPN & Device Management.
+
+2. **First-time setup inside the app.**
+   - Open the **Settings** tab.
+   - Paste your Anthropic API key into "AI (Claude / Anthropic)" → tap **Save API Key** → tap **Test connection**. Expect "✅ Connected".
+   - Tap **Connect Gmail + Calendar** → complete the Google sign-in in the browser sheet. The screen should flip to "✅ Connected" with your email shown.
+   - Toggle **Push notifications** on. iOS will prompt — accept.
+   - Pick an auto-check interval (15m is a sensible default).
+
+3. **Smoke-test the flows.**
+   - **Home:** hold the mic → speak → release. The app records audio (real), then falls through to a text input because Anthropic doesn't transcribe audio yet — tap the keyboard's mic icon to dictate. Submit. The capture should appear at the top, then flip to "Routed → ..." within a couple seconds.
+   - **Type test:** "remind me to call mom tomorrow at 3pm" should land in Calendar (or Tasks if Claude judges it ambiguous).
+   - **Triage:** open the Triage tab → pull down to refresh → emails should appear. Tap an action button or swipe (left = archive, right = mark read).
+   - **Tasks:** "+" in the header → add a quick task → swipe right to complete → swipe left to delete.
+   - **Siri:** Settings (iOS) → Siri & Search → ADHD Command Center → add "Log a thought", "Add a task", "Show my emails". Test "Hey Siri, log a thought" → should open the Home tab.
+
+4. **If something breaks**, screenshot the error and start a new Claude Code session — paste the error and the screen you were on. The implementation has logging at every API boundary.
+
+### Blockers needing Curtis's attention
+None. Everything required to ship and use the app is in place. The two known limitations (audio transcription stub, iOS-controlled background-fetch interval) are documented in the codebase and don't block first-use.
+
+---

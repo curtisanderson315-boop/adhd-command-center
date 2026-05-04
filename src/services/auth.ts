@@ -41,14 +41,6 @@ const SECURE_STORE_KEYS = {
   userEmail: 'google_user_email',
 };
 
-const discovery = AuthSession.useAutoDiscovery
-  ? undefined
-  : {
-      authorizationEndpoint: 'https://accounts.google.com/o/oauth2/v2/auth',
-      tokenEndpoint: 'https://oauth2.googleapis.com/token',
-      revocationEndpoint: 'https://oauth2.googleapis.com/revoke',
-    };
-
 export function useGoogleAuth() {
   const redirectUri = AuthSession.makeRedirectUri({ scheme: 'adhdcommandcenter' });
 
