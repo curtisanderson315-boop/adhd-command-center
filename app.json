@@ -18,7 +18,11 @@
       "infoPlist": {
         "NSSpeechRecognitionUsageDescription": "ADHD Command Center uses speech recognition to capture your thoughts via voice.",
         "NSMicrophoneUsageDescription": "ADHD Command Center needs microphone access to capture voice input.",
-        "UIBackgroundModes": ["fetch", "remote-notification"]
+        "UIBackgroundModes": [
+          "fetch",
+          "remote-notification"
+        ],
+        "ITSAppUsesNonExemptEncryption": false
       },
       "entitlements": {
         "com.apple.developer.siri": true
@@ -40,6 +44,7 @@
       "output": "static",
       "favicon": "./assets/favicon.png"
     },
+    "newArchEnabled": true,
     "plugins": [
       "expo-dev-client",
       "expo-secure-store",
@@ -50,6 +55,11 @@
           "color": "#6c63ff"
         }
       ]
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "1af8df19-af7b-493c-ad94-7bb4b3d85075"
+      }
+    }
   }
 }
