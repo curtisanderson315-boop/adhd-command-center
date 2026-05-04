@@ -10,7 +10,7 @@
  * React rendering, so the OS can re-execute the task body on a cold launch.
  */
 
-import * as BackgroundTask from 'expo-background-task';
+import * as BackgroundFetch from 'expo-background-fetch';
 import * as TaskManager from 'expo-task-manager';
 import * as Notifications from 'expo-notifications';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -28,11 +28,13 @@ const TRIAGE_QUEUE_KEY = '@adhd:triageQueue';
 
 TaskManager.defineTask(ADHD_EMAIL_POLL, async () => {
   try {
-    await runEmailPoll();
-    return BackgroundTask.BackgroundTaskResult.Success;
+    const result = await runEmailPoll();
+    return result
+      ? BackgroundFetch.BackgroundFetchResult.NewData
+      : BackgroundFetch.BackgroundFetchResult.NoData;
   } catch (e) {
     console.warn('[BackgroundPoll] failed:', e);
-    return BackgroundTask.BackgroundTaskResult.Failed;
+    return BackgroundFetch.BackgroundFetchResult.Failed;
   }
 });
 
@@ -79,12 +81,8 @@ async function runEmailPoll(): Promise<boolean> {
 // ─── Public API ─────────────────────────────────────────────────────────
 
 /**
- * Register the background task. Safe to call repeatedly — re-registering
+ * Register the background fetch task. Safe to call repeatedly — re-registering
  * with a new interval replaces the previous schedule. Pass 0 to unregister.
- *
- * Note: `minimumInterval` is in MINUTES in expo-background-task (was seconds
- * in the deprecated expo-background-fetch). iOS enforces a 15-minute floor
- * regardless of what we pass.
  */
 export async function registerBackgroundPolling(intervalMinutes: number): Promise<void> {
   if (intervalMinutes <= 0) {
@@ -94,10 +92,12 @@ export async function registerBackgroundPolling(intervalMinutes: number): Promis
   try {
     const isRegistered = await TaskManager.isTaskRegisteredAsync(ADHD_EMAIL_POLL);
     if (isRegistered) {
-      await BackgroundTask.unregisterTaskAsync(ADHD_EMAIL_POLL);
+      await BackgroundFetch.unregisterTaskAsync(ADHD_EMAIL_POLL);
     }
-    await BackgroundTask.registerTaskAsync(ADHD_EMAIL_POLL, {
-      minimumInterval: Math.max(15, intervalMinutes),
+    await BackgroundFetch.registerTaskAsync(ADHD_EMAIL_POLL, {
+      minimumInterval: Math.max(60, intervalMinutes * 60), // iOS may not honor sub-15-min intervals; floor at 60s
+      stopOnTerminate: false,
+      startOnBoot: true,
     });
   } catch (e) {
     console.warn('[BackgroundPoll] register failed:', e);
@@ -108,7 +108,7 @@ export async function unregisterBackgroundPolling(): Promise<void> {
   try {
     const isRegistered = await TaskManager.isTaskRegisteredAsync(ADHD_EMAIL_POLL);
     if (isRegistered) {
-      await BackgroundTask.unregisterTaskAsync(ADHD_EMAIL_POLL);
+      await BackgroundFetch.unregisterTaskAsync(ADHD_EMAIL_POLL);
     }
   } catch (e) {
     console.warn('[BackgroundPoll] unregister failed:', e);
