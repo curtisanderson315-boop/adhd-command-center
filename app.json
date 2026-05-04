@@ -47,7 +47,7 @@
       "output": "single",
       "favicon": "./assets/favicon.png"
     },
-    "newArchEnabled": false,
+    "newArchEnabled": true,
     "plugins": [
       "expo-dev-client",
       "expo-secure-store",
