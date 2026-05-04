@@ -138,3 +138,26 @@ The full app is implemented across all 5 phases:
 None. Everything required to ship and use the app is in place. The two known limitations (audio transcription stub, iOS-controlled background-fetch interval) are documented in the codebase and don't block first-use.
 
 ---
+
+## 2026-05-03 — Deprecation migrations (expo-av, expo-background-fetch)
+
+### Completed
+- Migrated `src/components/CaptureBar.tsx` from `expo-av` to `expo-audio`. Replaced the imperative `new Audio.Recording()` + `recordingRef` pattern with the `useAudioRecorder(RecordingPresets.HIGH_QUALITY)` hook, which owns the recorder lifecycle. Permission and audio-mode helpers are now top-level imports (`requestRecordingPermissionsAsync`, `setAudioModeAsync`) and the audio-mode flags lost their iOS suffix.
+- Migrated `src/services/background.ts` from `expo-background-fetch` to `expo-background-task`. `BackgroundTaskResult` only has `Success`/`Failed` (no NewData/NoData split). `minimumInterval` is in minutes now (was seconds) with an iOS-enforced 15-min floor. Dropped `stopOnTerminate`/`startOnBoot` (no longer accepted).
+- Updated `app.json`: added `expo-background-task` to the plugins array so its config plugin injects `UIBackgroundModes: processing` + `BGTaskSchedulerPermittedIdentifiers` at prebuild. Removed obsolete `"fetch"` from `UIBackgroundModes`.
+- Pinned to SDK 54 versions: `expo-audio@~1.1.1`, `expo-background-task@~1.0.10`. Both packages confirmed via `bundledNativeModules.json` for the SDK 54 branch.
+- Submitted EAS build `013e65c7-931a-4f4d-8318-94193796b199` from commit `0e8fd8b4`. **Build FINISHED** in ~3.6 minutes. IPA at https://expo.dev/artifacts/eas/9UDLqMM8gasvPY1utPC12.ipa.
+
+### Decisions Made
+- **Decision:** Used the hook-based `useAudioRecorder` rather than the class-based `createAudioRecorder` from `expo-audio`. **Reason:** The hook handles cleanup automatically and is the recommended pattern in the docs. Class-based requires a manual `recorder.remove()` and we'd reintroduce the same lifecycle complexity we just removed.
+- **Decision:** Dropped the custom `RECORDING_OPTIONS` object in favor of `RecordingPresets.HIGH_QUALITY`. **Reason:** Inspecting the preset shows it matches what we had bit-for-bit (M4A / 44.1 kHz / 2 channels / 128 kbps), so we trade six lines of config for a clearly-named constant.
+- **Decision:** Added `expo-background-task` to `app.json` plugins explicitly rather than relying on autolinking. **Reason:** Config plugins do not autolink the way native modules do — they require explicit registration to run during prebuild. Explicit beats relying on undocumented behavior.
+- **Decision:** Saved feedback memory authorizing autonomous EAS builds. **Reason:** Curtis's instruction "Submit EAS builds autonomously without asking me" applies to future sessions, not just this one.
+
+### Blockers
+- None. Both migrations compiled cleanly under `npx tsc --noEmit` and produced a successful EAS build on the first try.
+
+### Next Session Should Start With
+- Curtis: install IPA `9UDLqMM8gasvPY1utPC12.ipa` (the latest build) on the iPhone instead of the prior auth-fix build. Run through the smoke test from the SESSION COMPLETE block above. Pay attention to: voice recording still starts/stops cleanly, and background polling re-registers without a crash when the interval is changed in Settings.
+
+---
