@@ -4,3 +4,22 @@
 
 expo-env.d.ts
 # @end expo-cli
+
+# Expo / EAS workspace state — never commit, EAS regenerates on build
+.expo/
+.expo-shared/
+expo_log.txt
+
+# Native dirs are generated from app.json by `expo prebuild`
+ios/
+android/
+
+# Build outputs
+dist/
+web-build/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.log
