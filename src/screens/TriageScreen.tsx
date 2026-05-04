@@ -1,9 +1,11 @@
 /**
- * Email Triage Screen
- * One email at a time. Tap an action. Done.
+ * Email Triage Screen — one email at a time. Tap an action. Done.
+ *
+ * Auto-fetches on focus when a Google account + Claude key are connected.
+ * Swipe left to archive, right to dismiss as FYI.
  */
 
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -13,18 +15,39 @@ import {
   ScrollView,
   ActivityIndicator,
   Alert,
+  RefreshControl,
+  Dimensions,
 } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withTiming,
+  withSpring,
+  runOnJS,
+  Easing,
+  interpolate,
+  Extrapolation,
+} from 'react-native-reanimated';
+import * as Notifications from 'expo-notifications';
 import { useAppStore } from '../store';
 import { PriorityBadge } from '../components/PriorityBadge';
 import { colors, spacing, radius, typography } from '../theme';
-import { relativeTime } from '../services/utils';
-import { fetchUnreadEmails } from '../services/gmail';
+import { relativeTime, nanoid } from '../services/utils';
+import {
+  fetchUnreadEmails,
+  createDraft,
+  archiveMessage,
+  markAsRead,
+} from '../services/gmail';
 import { triageEmail } from '../services/ai';
-import { createDraft, archiveMessage, markAsRead } from '../services/gmail';
 import { createEvent } from '../services/calendar';
-import { getSavedEmail } from '../services/auth';
+import { getSavedEmail, isSignedIn } from '../services/auth';
 import type { TriagedEmail, TriageSuggestedAction } from '../types';
-import { nanoid } from '../services/utils';
+
+const SCREEN_WIDTH = Dimensions.get('window').width;
+const SWIPE_THRESHOLD = 110;
 
 const ACTION_BG: Record<string, string> = {
   reply: '#1e2a4a',
@@ -43,36 +66,107 @@ const ACTION_COLOR: Record<string, string> = {
 };
 
 export function TriageScreen() {
-  const { triageQueue, setTriageQueue, removeFromTriage, settings, addTask, lastTriageAt, setLastTriageAt } =
-    useAppStore();
+  const {
+    triageQueue,
+    setTriageQueue,
+    removeFromTriage,
+    settings,
+    addTask,
+    lastTriageAt,
+    setLastTriageAt,
+  } = useAppStore();
   const [loading, setLoading] = useState(false);
-  const [currentIdx, setCurrentIdx] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hasAutoFetched = useRef(false);
 
-  const current = triageQueue[currentIdx] ?? null;
+  const current = triageQueue[0] ?? null;
 
-  const runTriage = useCallback(async () => {
-    if (!settings.googleAccessToken && !settings.anthropicKey) {
-      Alert.alert('Setup Required', 'Connect your Google account and add an OpenAI key in Settings.');
-      return;
-    }
-    setLoading(true);
-    try {
-      const rawEmails = await fetchUnreadEmails(15);
-      const triaged = await Promise.all(
-        rawEmails.map((e) => triageEmail(e, settings.anthropicKey))
-      );
-      // Sort: urgent → action_needed → fyi → noise
-      const order = { urgent: 0, action_needed: 1, fyi: 2, noise: 3 };
-      triaged.sort((a, b) => order[a.priority] - order[b.priority]);
-      setTriageQueue(triaged);
-      setCurrentIdx(0);
-      setLastTriageAt(Date.now());
-    } catch (e: any) {
-      Alert.alert('Triage Error', e.message);
-    } finally {
-      setLoading(false);
-    }
-  }, [settings]);
+  const showToast = useCallback((msg: string) => {
+    setToast(msg);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 2200);
+  }, []);
+
+  const runTriage = useCallback(
+    async ({ silent = false }: { silent?: boolean } = {}) => {
+      if (!settings.anthropicKey) {
+        if (!silent) {
+          Alert.alert(
+            'Add your Claude API key',
+            'Open Settings and paste a key from console.anthropic.com to enable triage.'
+          );
+        }
+        return;
+      }
+      const signed = await isSignedIn();
+      if (!signed) {
+        if (!silent) {
+          Alert.alert(
+            'Connect your Google account',
+            'Open Settings and connect Gmail so I can read your inbox.'
+          );
+        }
+        return;
+      }
+
+      if (silent) setRefreshing(true);
+      else setLoading(true);
+
+      try {
+        const rawEmails = await fetchUnreadEmails(15);
+        if (rawEmails.length === 0) {
+          setTriageQueue([]);
+          setLastTriageAt(Date.now());
+          return;
+        }
+        const triaged = await Promise.all(
+          rawEmails.map((e) => triageEmail(e, settings.anthropicKey))
+        );
+        const order = { urgent: 0, action_needed: 1, fyi: 2, noise: 3 };
+        triaged.sort((a, b) => order[a.priority] - order[b.priority]);
+        setTriageQueue(triaged);
+        setLastTriageAt(Date.now());
+      } catch (e: any) {
+        if (!silent) Alert.alert('Triage error', e?.message ?? 'Something went wrong.');
+      } finally {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    },
+    [settings.anthropicKey, setTriageQueue, setLastTriageAt]
+  );
+
+  // Auto-fetch on first focus per session if queue is empty
+  useFocusEffect(
+    useCallback(() => {
+      if (
+        !hasAutoFetched.current &&
+        triageQueue.length === 0 &&
+        settings.anthropicKey
+      ) {
+        hasAutoFetched.current = true;
+        void runTriage({ silent: true });
+      }
+    }, [runTriage, triageQueue.length, settings.anthropicKey])
+  );
+
+  useEffect(() => {
+    return () => {
+      if (toastTimer.current) clearTimeout(toastTimer.current);
+    };
+  }, []);
+
+  // ── Action handlers ──────────────────────────────────────────────────
+
+  const completeAction = useCallback(
+    (emailId: string, message: string) => {
+      removeFromTriage(emailId);
+      showToast(message);
+    },
+    [removeFromTriage, showToast]
+  );
 
   const handleAction = async (email: TriagedEmail, action: TriageSuggestedAction) => {
     try {
@@ -85,7 +179,8 @@ export function TriageScreen() {
           fromEmail,
         });
         await markAsRead(email.id);
-        Alert.alert('Draft saved', 'Your reply draft is in Gmail. Review and send when ready.');
+        completeAction(email.id, '✉️ Draft saved to Gmail');
+        return;
       }
 
       if (action.actionType === 'calendar_event' && action.calendarEvent) {
@@ -96,6 +191,8 @@ export function TriageScreen() {
           durationMinutes: action.calendarEvent.durationMinutes ?? 60,
         });
         await markAsRead(email.id);
+        completeAction(email.id, '📅 Added to Calendar');
+        return;
       }
 
       if (action.actionType === 'task' && action.taskText) {
@@ -109,114 +206,262 @@ export function TriageScreen() {
           sourceEmailId: email.id,
         });
         await markAsRead(email.id);
+        completeAction(email.id, '✅ Added to Today');
+        return;
       }
 
       if (action.actionType === 'archive') {
         await archiveMessage(email.id);
+        completeAction(email.id, '🗑 Archived');
+        return;
+      }
+
+      if (action.actionType === 'snooze') {
+        const until = action.snoozeUntil ? new Date(action.snoozeUntil) : null;
+        if (until && until.getTime() > Date.now() && settings.notificationsEnabled) {
+          const seconds = Math.max(60, Math.floor((until.getTime() - Date.now()) / 1000));
+          await Notifications.scheduleNotificationAsync({
+            content: {
+              title: '⏰ Snoozed email is back',
+              body: email.subject,
+              data: { emailId: email.id, type: 'snooze' },
+            },
+            trigger: {
+              type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+              seconds,
+              repeats: false,
+            },
+          });
+        }
+        completeAction(email.id, '😴 Snoozed');
       }
     } catch (e: any) {
-      console.warn('Action error:', e.message);
+      Alert.alert('Action failed', e?.message ?? 'Try again in a moment.');
     }
-
-    // Advance to next
-    removeFromTriage(email.id);
-    setCurrentIdx((i) => Math.max(0, i));
   };
+
+  const handleArchiveSwipe = async (email: TriagedEmail) => {
+    try {
+      await archiveMessage(email.id);
+    } catch {
+      // Already removed locally; surface nothing if API hiccups
+    }
+    completeAction(email.id, '🗑 Archived');
+  };
+
+  const handleDismissSwipe = async (email: TriagedEmail) => {
+    try {
+      await markAsRead(email.id);
+    } catch {
+      /* noop */
+    }
+    completeAction(email.id, '✓ Marked as read');
+  };
+
+  // ── Render ───────────────────────────────────────────────────────────
 
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Email Triage</Text>
-        {lastTriageAt && (
+        {lastTriageAt ? (
           <Text style={styles.headerSub}>
             Last checked {relativeTime(new Date(lastTriageAt).toISOString())}
           </Text>
+        ) : (
+          <Text style={styles.headerSub}>Pull down to check your inbox.</Text>
         )}
       </View>
 
       {loading ? (
         <View style={styles.center}>
           <ActivityIndicator size="large" color={colors.purple} />
-          <Text style={styles.loadingText}>Reading your inbox…</Text>
+          <Text style={styles.loadingText}>Checking your inbox...</Text>
         </View>
       ) : triageQueue.length === 0 ? (
-        <View style={styles.center}>
-          <Text style={styles.emptyIcon}>📭</Text>
-          <Text style={styles.emptyTitle}>All caught up!</Text>
-          <Text style={styles.emptySub}>No emails waiting for triage.</Text>
-          <TouchableOpacity style={styles.refreshBtn} onPress={runTriage}>
+        <ScrollView
+          contentContainerStyle={styles.center}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={() => void runTriage({ silent: true })}
+              tintColor={colors.purple}
+            />
+          }
+        >
+          <Text style={styles.emptyIcon}>📬</Text>
+          <Text style={styles.emptyTitle}>Inbox zero</Text>
+          <Text style={styles.emptySub}>
+            Nothing to triage right now. Pull down to check again.
+          </Text>
+          <TouchableOpacity style={styles.refreshBtn} onPress={() => void runTriage()}>
             <Text style={styles.refreshBtnText}>Check now</Text>
           </TouchableOpacity>
-        </View>
-      ) : current ? (
-        <ScrollView contentContainerStyle={styles.card}>
-          {/* Progress indicator */}
-          <Text style={styles.progress}>
-            {currentIdx + 1} of {triageQueue.length}
-          </Text>
-
-          {/* Priority badge */}
-          <PriorityBadge priority={current.priority} />
-
-          {/* From / Subject */}
-          <Text style={styles.subject} numberOfLines={3}>
-            {current.subject}
-          </Text>
-          <Text style={styles.from}>{current.from}</Text>
-          <Text style={styles.time}>{relativeTime(current.receivedAt)}</Text>
-
-          {/* AI summary */}
-          <View style={styles.summaryBox}>
-            <Text style={styles.summaryLabel}>WHAT IS THIS</Text>
-            <Text style={styles.summaryText}>{current.summary}</Text>
-            {current.priorityReason ? (
-              <Text style={styles.reasonText}>↑ {current.priorityReason}</Text>
-            ) : null}
-          </View>
-
-          {/* Action buttons */}
-          <Text style={styles.actionsLabel}>WHAT TO DO</Text>
-          <View style={styles.actions}>
-            {current.suggestedActions.map((action, i) => (
-              <TouchableOpacity
-                key={i}
-                style={[
-                  styles.actionBtn,
-                  { backgroundColor: ACTION_BG[action.actionType] ?? '#1e1e2e' },
-                ]}
-                onPress={() => handleAction(current, action)}
-              >
-                <Text
-                  style={[
-                    styles.actionLabel,
-                    { color: ACTION_COLOR[action.actionType] ?? colors.textPrimary },
-                  ]}
-                >
-                  {action.label}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          {/* Skip */}
-          <TouchableOpacity
-            style={styles.skipBtn}
-            onPress={() => {
-              removeFromTriage(current.id);
-              setCurrentIdx((i) => Math.max(0, i));
-            }}
-          >
-            <Text style={styles.skipText}>Skip for now</Text>
-          </TouchableOpacity>
         </ScrollView>
+      ) : current ? (
+        <SwipeableTriageCard
+          key={current.id}
+          email={current}
+          queueSize={triageQueue.length}
+          onSwipeArchive={() => handleArchiveSwipe(current)}
+          onSwipeDismiss={() => handleDismissSwipe(current)}
+          onAction={(action) => handleAction(current, action)}
+          onSkip={() => completeAction(current.id, 'Skipped')}
+        />
       ) : null}
 
       {!loading && triageQueue.length > 0 && (
-        <TouchableOpacity style={styles.fab} onPress={runTriage}>
+        <TouchableOpacity style={styles.fab} onPress={() => void runTriage()}>
           <Text style={styles.fabText}>↺</Text>
         </TouchableOpacity>
       )}
+
+      {toast ? (
+        <View style={styles.toast} pointerEvents="none">
+          <Text style={styles.toastText}>{toast}</Text>
+        </View>
+      ) : null}
     </SafeAreaView>
+  );
+}
+
+// ── Swipeable card ──────────────────────────────────────────────────────
+
+interface CardProps {
+  email: TriagedEmail;
+  queueSize: number;
+  onSwipeArchive: () => void;
+  onSwipeDismiss: () => void;
+  onAction: (action: TriageSuggestedAction) => void;
+  onSkip: () => void;
+}
+
+function SwipeableTriageCard({
+  email,
+  queueSize,
+  onSwipeArchive,
+  onSwipeDismiss,
+  onAction,
+  onSkip,
+}: CardProps) {
+  const translateX = useSharedValue(0);
+
+  const pan = Gesture.Pan()
+    .activeOffsetX([-20, 20])
+    .onUpdate((e) => {
+      translateX.value = e.translationX;
+    })
+    .onEnd((e) => {
+      if (e.translationX < -SWIPE_THRESHOLD) {
+        translateX.value = withTiming(-SCREEN_WIDTH, { duration: 220 }, () => {
+          runOnJS(onSwipeArchive)();
+        });
+      } else if (e.translationX > SWIPE_THRESHOLD) {
+        translateX.value = withTiming(SCREEN_WIDTH, { duration: 220 }, () => {
+          runOnJS(onSwipeDismiss)();
+        });
+      } else {
+        translateX.value = withSpring(0, { damping: 20 });
+      }
+    });
+
+  const cardStyle = useAnimatedStyle(() => ({
+    transform: [
+      { translateX: translateX.value },
+      {
+        rotate: `${interpolate(
+          translateX.value,
+          [-SCREEN_WIDTH, 0, SCREEN_WIDTH],
+          [-8, 0, 8],
+          Extrapolation.CLAMP
+        )}deg`,
+      },
+    ],
+  }));
+
+  const archiveHintStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(
+      translateX.value,
+      [-SWIPE_THRESHOLD, 0],
+      [1, 0],
+      Extrapolation.CLAMP
+    ),
+  }));
+
+  const dismissHintStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(
+      translateX.value,
+      [0, SWIPE_THRESHOLD],
+      [0, 1],
+      Extrapolation.CLAMP
+    ),
+  }));
+
+  return (
+    <View style={styles.cardLayer}>
+      <Animated.View style={[styles.swipeHint, styles.swipeHintLeft, archiveHintStyle]}>
+        <Text style={styles.swipeHintIcon}>🗑</Text>
+        <Text style={styles.swipeHintText}>Archive</Text>
+      </Animated.View>
+      <Animated.View style={[styles.swipeHint, styles.swipeHintRight, dismissHintStyle]}>
+        <Text style={styles.swipeHintIcon}>✓</Text>
+        <Text style={styles.swipeHintText}>Got it</Text>
+      </Animated.View>
+
+      <GestureDetector gesture={pan}>
+        <Animated.View style={[styles.cardWrap, cardStyle]}>
+          <ScrollView contentContainerStyle={styles.card}>
+            <Text style={styles.progress}>1 of {queueSize}</Text>
+            <PriorityBadge priority={email.priority} />
+
+            <Text style={styles.subject} numberOfLines={3}>
+              {email.subject}
+            </Text>
+            <Text style={styles.from}>{email.from}</Text>
+            <Text style={styles.time}>{relativeTime(email.receivedAt)}</Text>
+
+            <View style={styles.summaryBox}>
+              <Text style={styles.summaryLabel}>WHAT IS THIS</Text>
+              <Text style={styles.summaryText}>{email.summary}</Text>
+              {email.priorityReason ? (
+                <Text style={styles.reasonText}>↑ {email.priorityReason}</Text>
+              ) : null}
+            </View>
+
+            <Text style={styles.actionsLabel}>WHAT TO DO</Text>
+            <View style={styles.actions}>
+              {email.suggestedActions.map((action, i) => (
+                <TouchableOpacity
+                  key={i}
+                  style={[
+                    styles.actionBtn,
+                    { backgroundColor: ACTION_BG[action.actionType] ?? '#1e1e2e' },
+                  ]}
+                  onPress={() => onAction(action)}
+                >
+                  <Text
+                    style={[
+                      styles.actionLabel,
+                      { color: ACTION_COLOR[action.actionType] ?? colors.textPrimary },
+                    ]}
+                  >
+                    {action.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            <Text style={styles.swipeFooter}>
+              Swipe left to archive · right to dismiss
+            </Text>
+
+            <TouchableOpacity style={styles.skipBtn} onPress={onSkip}>
+              <Text style={styles.skipText}>Skip for now</Text>
+            </TouchableOpacity>
+          </ScrollView>
+        </Animated.View>
+      </GestureDetector>
+    </View>
   );
 }
 
@@ -230,7 +475,7 @@ const styles = StyleSheet.create({
   headerTitle: typography.h1,
   headerSub: { ...typography.bodyMuted, marginTop: 4 },
   center: {
-    flex: 1,
+    flexGrow: 1,
     alignItems: 'center',
     justifyContent: 'center',
     gap: spacing.md,
@@ -248,9 +493,28 @@ const styles = StyleSheet.create({
     borderRadius: radius.full,
   },
   refreshBtnText: { color: '#fff', fontWeight: '700', fontSize: 16 },
+
+  cardLayer: { flex: 1, position: 'relative' },
+  cardWrap: { flex: 1 },
   card: {
     padding: spacing.lg,
     gap: spacing.md,
+    paddingBottom: spacing.xxl,
+  },
+  swipeHint: {
+    position: 'absolute',
+    top: '40%',
+    alignItems: 'center',
+    gap: 4,
+    zIndex: 0,
+  },
+  swipeHintLeft: { right: 32 },
+  swipeHintRight: { left: 32 },
+  swipeHintIcon: { fontSize: 36 },
+  swipeHintText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: colors.textSecondary,
   },
   progress: {
     ...typography.caption,
@@ -258,7 +522,7 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-end',
   },
   subject: {
-    fontSize: 20,
+    fontSize: 22,
     fontWeight: '700',
     color: colors.textPrimary,
     lineHeight: 28,
@@ -291,17 +555,24 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.lg,
     borderRadius: radius.md,
     alignItems: 'center',
+    minHeight: 52,
+    justifyContent: 'center',
   },
   actionLabel: { fontWeight: '700', fontSize: 16 },
-  skipBtn: { alignItems: 'center', paddingVertical: spacing.lg },
-  skipText: { color: colors.textMuted, fontSize: 14, fontWeight: '600' },
+  swipeFooter: {
+    ...typography.caption,
+    textAlign: 'center',
+    marginTop: spacing.md,
+  },
+  skipBtn: { alignItems: 'center', paddingVertical: spacing.md },
+  skipText: { color: colors.textMuted, fontSize: 16, fontWeight: '600' },
   fab: {
     position: 'absolute',
     bottom: 32,
     right: 24,
-    width: 48,
-    height: 48,
-    borderRadius: 24,
+    width: 52,
+    height: 52,
+    borderRadius: 26,
     backgroundColor: colors.bgCard,
     borderWidth: 1,
     borderColor: colors.border,
@@ -309,4 +580,25 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   fabText: { color: colors.textSecondary, fontSize: 22 },
+  toast: {
+    position: 'absolute',
+    bottom: 100,
+    alignSelf: 'center',
+    backgroundColor: colors.bgCard,
+    borderColor: colors.border,
+    borderWidth: 1,
+    borderRadius: radius.full,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+    shadowColor: '#000',
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 6,
+  },
+  toastText: {
+    color: colors.textPrimary,
+    fontSize: 16,
+    fontWeight: '600',
+  },
 });

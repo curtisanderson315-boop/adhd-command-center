@@ -7,6 +7,7 @@ import type {
   Note,
   AppSettings,
 } from '../types';
+import { getStoredTriageQueue } from '../services/background';
 
 interface AppState {
   // ── Captured items (voice captures) ──────────────────────────────────────
@@ -57,6 +58,7 @@ const STORAGE_KEYS = {
   notes: '@adhd:notes',
   settings: '@adhd:settings',
   lastTriageAt: '@adhd:lastTriageAt',
+  triageQueue: '@adhd:triageQueue',
 };
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -89,12 +91,17 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   // ── Triage ─────────────────────────────────────────────────────────────────
-  setTriageQueue: (emails) => set({ triageQueue: emails }),
+  setTriageQueue: (emails) => {
+    set({ triageQueue: emails });
+    AsyncStorage.setItem(STORAGE_KEYS.triageQueue, JSON.stringify(emails));
+  },
 
   removeFromTriage: (id) =>
-    set((state) => ({
-      triageQueue: state.triageQueue.filter((e) => e.id !== id),
-    })),
+    set((state) => {
+      const next = state.triageQueue.filter((e) => e.id !== id);
+      AsyncStorage.setItem(STORAGE_KEYS.triageQueue, JSON.stringify(next));
+      return { triageQueue: next };
+    }),
 
   setLastTriageAt: (ts) => {
     set({ lastTriageAt: ts });
@@ -145,13 +152,15 @@ export const useAppStore = create<AppState>((set, get) => ({
   // ── Hydrate from storage ───────────────────────────────────────────────────
   hydrate: async () => {
     try {
-      const [captures, tasks, notes, settings, lastTriageAt] = await Promise.all([
-        AsyncStorage.getItem(STORAGE_KEYS.captures),
-        AsyncStorage.getItem(STORAGE_KEYS.tasks),
-        AsyncStorage.getItem(STORAGE_KEYS.notes),
-        AsyncStorage.getItem(STORAGE_KEYS.settings),
-        AsyncStorage.getItem(STORAGE_KEYS.lastTriageAt),
-      ]);
+      const [captures, tasks, notes, settings, lastTriageAt, backgroundQueue] =
+        await Promise.all([
+          AsyncStorage.getItem(STORAGE_KEYS.captures),
+          AsyncStorage.getItem(STORAGE_KEYS.tasks),
+          AsyncStorage.getItem(STORAGE_KEYS.notes),
+          AsyncStorage.getItem(STORAGE_KEYS.settings),
+          AsyncStorage.getItem(STORAGE_KEYS.lastTriageAt),
+          getStoredTriageQueue(),
+        ]);
 
       set({
         captures: captures ? JSON.parse(captures) : [],
@@ -161,6 +170,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           ? { ...DEFAULT_SETTINGS, ...JSON.parse(settings) }
           : DEFAULT_SETTINGS,
         lastTriageAt: lastTriageAt ? Number(lastTriageAt) : null,
+        triageQueue: backgroundQueue,
       });
     } catch (e) {
       console.error('Failed to hydrate store:', e);

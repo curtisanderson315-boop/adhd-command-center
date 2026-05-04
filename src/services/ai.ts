@@ -163,6 +163,25 @@ User said: "${transcript}"`;
   }));
 }
 
+// ─── Audio transcription ─────────────────────────────────────────────────────
+//
+// The Anthropic Claude API does not currently accept audio inputs. We expose a
+// transcription entry point anyway so the UI can attempt it and fall back to the
+// keyboard text-input flow when it returns null. When/if Claude (or a sidecar
+// service the user configures) gains audio support, this is the single seam to
+// upgrade — UI does not need to change.
+//
+// Returns the transcript text, or null when transcription is unavailable.
+
+export async function transcribeAudio(
+  _audioUri: string,
+  _apiKey: string
+): Promise<string | null> {
+  // TODO: BLOCKED — Anthropic API has no audio endpoint. Wire OpenAI Whisper
+  // or native iOS SFSpeechRecognizer here when the user is ready to add it.
+  return null;
+}
+
 // ─── Email triage ─────────────────────────────────────────────────────────────
 
 export async function triageEmail(

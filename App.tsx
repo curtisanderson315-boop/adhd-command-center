@@ -5,6 +5,7 @@ import { Text, Platform } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
+import * as Notifications from 'expo-notifications';
 import type { NavigationContainerRef } from '@react-navigation/native';
 
 import { HomeScreen } from './src/screens/HomeScreen';
@@ -14,6 +15,10 @@ import { SettingsScreen } from './src/screens/SettingsScreen';
 import { useAppStore } from './src/store';
 import { colors } from './src/theme';
 import { registerShortcuts, onSiriShortcut } from './src/services/siri';
+import {
+  registerBackgroundPolling,
+  NOTIFICATION_TAP_ROUTE,
+} from './src/services/background';
 
 const Tab = createBottomTabNavigator();
 
@@ -24,19 +29,30 @@ const TABS = [
   { name: 'Settings', component: SettingsScreen, icon: '⚙️', label: 'Settings' },
 ];
 
+// Show banner + sound + badge when a notification arrives in the foreground
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldShowBanner: true,
+    shouldShowList: true,
+    shouldPlaySound: true,
+    shouldSetBadge: true,
+  }),
+});
+
 export default function App() {
   const hydrate = useAppStore((s) => s.hydrate);
   const triageQueue = useAppStore((s) => s.triageQueue);
   const tasks = useAppStore((s) => s.tasks);
+  const triageInterval = useAppStore((s) => s.settings.triageIntervalMinutes);
   const navRef = useRef<NavigationContainerRef<any>>(null);
 
+  // ── Bootstrap: hydrate, register Siri, wire notification taps ──────────
   useEffect(() => {
     hydrate();
-    // Register Siri shortcuts so they appear in Settings → Siri & Search
     registerShortcuts();
 
-    // Handle Siri shortcut activations
-    const unsub = onSiriShortcut((action) => {
+    const unsubSiri = onSiriShortcut((action) => {
       if (!navRef.current) return;
       switch (action) {
         case 'log_thought':
@@ -49,8 +65,25 @@ export default function App() {
       }
     });
 
-    return unsub;
+    const tapSub = Notifications.addNotificationResponseReceivedListener((response) => {
+      const data = response.notification.request.content.data as
+        | { type?: string; route?: string }
+        | undefined;
+      if (data?.type === NOTIFICATION_TAP_ROUTE && data.route && navRef.current) {
+        navRef.current.navigate(data.route);
+      }
+    });
+
+    return () => {
+      unsubSiri();
+      tapSub.remove();
+    };
   }, []);
+
+  // ── Re-register background polling whenever the interval changes ───────
+  useEffect(() => {
+    void registerBackgroundPolling(triageInterval);
+  }, [triageInterval]);
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>

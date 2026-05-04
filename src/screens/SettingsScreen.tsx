@@ -9,10 +9,27 @@ import {
   ScrollView,
   Alert,
   Switch,
+  ActivityIndicator,
 } from 'react-native';
+import * as Notifications from 'expo-notifications';
 import { useAppStore } from '../store';
 import { useGoogleAuth, exchangeCodeForTokens, signOut, getSavedEmail, isSignedIn } from '../services/auth';
 import { colors, spacing, radius, typography } from '../theme';
+
+type TestResult = 'idle' | 'testing' | 'ok' | 'fail';
+
+const TRIAGE_INTERVALS: Array<{ minutes: number; label: string }> = [
+  { minutes: 5, label: '5m' },
+  { minutes: 15, label: '15m' },
+  { minutes: 30, label: '30m' },
+  { minutes: 0, label: 'Manual' },
+];
+
+function maskKey(key: string): string {
+  if (!key) return '';
+  if (key.length <= 12) return `${key.slice(0, 4)}…`;
+  return `${key.slice(0, 8)}…${key.slice(-4)}`;
+}
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -35,6 +52,8 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 export function SettingsScreen() {
   const { settings, updateSettings } = useAppStore();
   const [apiKey, setApiKey] = useState(settings.anthropicKey);
+  const [editingKey, setEditingKey] = useState(!settings.anthropicKey);
+  const [testStatus, setTestStatus] = useState<TestResult>('idle');
   const [signedIn, setSignedIn] = useState(false);
   const [userEmail, setUserEmail] = useState('');
 
@@ -71,8 +90,62 @@ export function SettingsScreen() {
   }, [response]);
 
   const handleSaveApiKey = async () => {
-    await updateSettings({ anthropicKey: apiKey.trim() });
-    Alert.alert('Saved', 'Anthropic API key saved.');
+    const trimmed = apiKey.trim();
+    await updateSettings({ anthropicKey: trimmed });
+    setApiKey(trimmed);
+    setEditingKey(false);
+    setTestStatus('idle');
+  };
+
+  const handleTestApiKey = async () => {
+    const key = apiKey.trim();
+    if (!key) {
+      Alert.alert('Add a key first', 'Paste your Anthropic key, save, then test.');
+      return;
+    }
+    setTestStatus('testing');
+    try {
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': key,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 8,
+          messages: [{ role: 'user', content: 'Say "ok".' }],
+        }),
+      });
+      if (res.ok) {
+        setTestStatus('ok');
+        if (key !== settings.anthropicKey) {
+          await updateSettings({ anthropicKey: key });
+        }
+      } else {
+        setTestStatus('fail');
+      }
+    } catch {
+      setTestStatus('fail');
+    }
+  };
+
+  const handleNotificationsToggle = async (enabled: boolean) => {
+    if (enabled) {
+      const perm = await Notifications.getPermissionsAsync();
+      if (!perm.granted) {
+        const req = await Notifications.requestPermissionsAsync();
+        if (!req.granted) {
+          Alert.alert(
+            'Notifications denied',
+            'Open iOS Settings → ADHD Command Center → Notifications to enable them.'
+          );
+          return;
+        }
+      }
+    }
+    await updateSettings({ notificationsEnabled: enabled });
   };
 
   const handleSignOut = async () => {
@@ -127,50 +200,90 @@ export function SettingsScreen() {
           <Text style={styles.hint}>
             Get your API key at console.anthropic.com → API Keys. Claude Sonnet is used for voice capture, Claude Haiku for fast email triage.
           </Text>
-          <TextInput
-            style={styles.input}
-            placeholder="sk-ant-..."
-            placeholderTextColor={colors.textMuted}
-            value={apiKey}
-            onChangeText={setApiKey}
-            secureTextEntry
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
-          <TouchableOpacity style={styles.saveBtn} onPress={handleSaveApiKey}>
-            <Text style={styles.saveBtnText}>Save API Key</Text>
+
+          {!editingKey && settings.anthropicKey ? (
+            <View style={styles.savedKeyRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.savedKeyLabel}>Saved key</Text>
+                <Text style={styles.savedKeyValue}>{maskKey(settings.anthropicKey)}</Text>
+              </View>
+              <TouchableOpacity
+                onPress={() => {
+                  setEditingKey(true);
+                  setApiKey(settings.anthropicKey);
+                }}
+                style={styles.linkBtn}
+              >
+                <Text style={styles.linkBtnText}>Replace</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <>
+              <TextInput
+                style={styles.input}
+                placeholder="sk-ant-..."
+                placeholderTextColor={colors.textMuted}
+                value={apiKey}
+                onChangeText={(v) => {
+                  setApiKey(v);
+                  setTestStatus('idle');
+                }}
+                secureTextEntry
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+              <TouchableOpacity style={styles.saveBtn} onPress={handleSaveApiKey}>
+                <Text style={styles.saveBtnText}>Save API Key</Text>
+              </TouchableOpacity>
+            </>
+          )}
+
+          <TouchableOpacity
+            style={styles.secondaryBtn}
+            onPress={handleTestApiKey}
+            disabled={testStatus === 'testing'}
+          >
+            {testStatus === 'testing' ? (
+              <ActivityIndicator color={colors.textPrimary} />
+            ) : (
+              <Text style={styles.secondaryBtnText}>
+                {testStatus === 'ok'
+                  ? '✅ Connected'
+                  : testStatus === 'fail'
+                  ? '❌ Test failed — check the key'
+                  : 'Test connection'}
+              </Text>
+            )}
           </TouchableOpacity>
         </Section>
 
         {/* ── Triage settings ───────────────────────────────────────── */}
         <Section title="EMAIL TRIAGE">
-          <Row label="Auto-check interval">
+          <View style={styles.intervalGroup}>
+            <Text style={styles.rowLabel}>Auto-check interval</Text>
             <View style={styles.segmented}>
-              {[15, 30, 60].map((min) => (
-                <TouchableOpacity
-                  key={min}
-                  style={[
-                    styles.segment,
-                    settings.triageIntervalMinutes === min && styles.segmentActive,
-                  ]}
-                  onPress={() => updateSettings({ triageIntervalMinutes: min })}
-                >
-                  <Text
-                    style={[
-                      styles.segmentText,
-                      settings.triageIntervalMinutes === min && styles.segmentTextActive,
-                    ]}
+              {TRIAGE_INTERVALS.map(({ minutes, label }) => {
+                const active = settings.triageIntervalMinutes === minutes;
+                return (
+                  <TouchableOpacity
+                    key={label}
+                    style={[styles.segment, active && styles.segmentActive]}
+                    onPress={() => updateSettings({ triageIntervalMinutes: minutes })}
                   >
-                    {min}m
-                  </Text>
-                </TouchableOpacity>
-              ))}
+                    <Text
+                      style={[styles.segmentText, active && styles.segmentTextActive]}
+                    >
+                      {label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
             </View>
-          </Row>
+          </View>
           <Row label="Push notifications">
             <Switch
               value={settings.notificationsEnabled}
-              onValueChange={(v) => updateSettings({ notificationsEnabled: v })}
+              onValueChange={handleNotificationsToggle}
               trackColor={{ false: colors.border, true: colors.purple }}
               thumbColor="#fff"
             />
@@ -207,14 +320,14 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
   },
-  hint: { ...typography.caption, lineHeight: 18 },
+  hint: { ...typography.bodyMuted, fontSize: 14, lineHeight: 20 },
   input: {
     backgroundColor: colors.bgInput,
     borderRadius: radius.md,
     paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+    paddingVertical: spacing.md,
     color: colors.textPrimary,
-    fontSize: 14,
+    fontSize: 16,
     fontFamily: 'monospace',
   },
   saveBtn: {
@@ -223,14 +336,54 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.md,
     alignItems: 'center',
   },
-  saveBtnText: { color: '#fff', fontWeight: '700', fontSize: 15 },
+  saveBtnText: { color: '#fff', fontWeight: '700', fontSize: 16 },
+  secondaryBtn: {
+    borderRadius: radius.md,
+    paddingVertical: spacing.md,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.bgInput,
+    minHeight: 48,
+    justifyContent: 'center',
+  },
+  secondaryBtnText: {
+    color: colors.textPrimary,
+    fontWeight: '600',
+    fontSize: 16,
+  },
+  savedKeyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.bgInput,
+    borderRadius: radius.md,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    gap: spacing.sm,
+  },
+  savedKeyLabel: { ...typography.label, marginBottom: 2 },
+  savedKeyValue: {
+    fontFamily: 'monospace',
+    fontSize: 16,
+    color: colors.textPrimary,
+  },
+  linkBtn: {
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+  },
+  linkBtnText: {
+    color: colors.purple,
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  intervalGroup: { gap: spacing.sm },
   googleBtn: {
     backgroundColor: '#1a73e8',
     borderRadius: radius.md,
     paddingVertical: spacing.md,
     alignItems: 'center',
   },
-  googleBtnText: { color: '#fff', fontWeight: '700', fontSize: 15 },
+  googleBtnText: { color: '#fff', fontWeight: '700', fontSize: 16 },
   connectedRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -245,23 +398,26 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.error,
   },
-  signOutText: { color: colors.error, fontWeight: '600', fontSize: 14 },
+  signOutText: { color: colors.error, fontWeight: '600', fontSize: 16 },
   row: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
   },
   rowLabel: { ...typography.body },
-  segmented: { flexDirection: 'row', gap: spacing.xs },
+  segmented: { flexDirection: 'row', gap: spacing.xs, flexWrap: 'wrap' },
   segment: {
     paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs,
+    paddingVertical: spacing.sm,
     borderRadius: radius.full,
     borderWidth: 1,
     borderColor: colors.border,
+    minHeight: 40,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   segmentActive: { backgroundColor: colors.purple, borderColor: colors.purple },
-  segmentText: { color: colors.textMuted, fontWeight: '600', fontSize: 13 },
+  segmentText: { color: colors.textMuted, fontWeight: '600', fontSize: 16 },
   segmentTextActive: { color: '#fff' },
   version: { ...typography.caption, textAlign: 'center', marginTop: spacing.xl },
 });
