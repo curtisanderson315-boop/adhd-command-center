@@ -17,5 +17,4 @@ AUTONOMOUS_PROMPT.md
 prebuild_local.bat
 prebuild_test.bat
 eas_build.ps1
-.npmrc
 .claude/
