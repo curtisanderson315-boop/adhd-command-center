@@ -9,7 +9,7 @@
     "web": "expo start --web",
     "build:ios": "eas build --platform ios",
     "build:android": "eas build --platform android",
-    "eas-build-pre-install": "mkdir -p .expo/web && chmod -R 0777 .expo"
+    "eas-build-pre-install": "sudo rm -rf .expo; mkdir -p .expo/web; chmod -R 0777 .expo"
   },
   "dependencies": {
     "@config-plugins/react-native-siri-shortcut": "^11.0.0",
