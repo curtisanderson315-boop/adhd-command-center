@@ -8,7 +8,8 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "build:ios": "eas build --platform ios",
-    "build:android": "eas build --platform android"
+    "build:android": "eas build --platform android",
+    "eas-build-post-install": "rm -rf .expo && chmod -R u+w ."
   },
   "dependencies": {
     "@config-plugins/react-native-siri-shortcut": "^11.0.0",
