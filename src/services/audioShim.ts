@@ -1,55 +1,94 @@
 /**
- * audioShim.ts — graceful fallback when the ExpoAudio native module is absent.
+ * audioShim.ts — graceful fallback when the ExpoAV native module is absent.
  *
- * expo-audio requires a native module that must be compiled into the IPA.
- * If an older dev build is installed (or a fresh build hasn't landed yet),
- * requiring expo-audio throws at startup and kills the whole app.
+ * Wraps expo-av's class-based Audio.Recording API in a hook-shaped interface
+ * that matches what CaptureBar expects (prepareToRecordAsync, record, stop, uri).
  *
- * This shim detects availability once at module load, then exports:
- *   - isAudioAvailable  — false when we should skip all recording UI
- *   - useSafeAudioRecorder  — hook that always follows rules-of-hooks;
- *       delegates to the real hook when native is present, returns stubs otherwise
- *   - safeRequestPermissions / safeSetAudioMode — async wrappers that no-op when absent
+ * If the native module isn't linked into the IPA, we degrade to stubs so the
+ * app still launches; CaptureBar checks isAudioAvailable and falls through to
+ * text input.
  */
+
+import { useRef } from 'react';
 
 // ─── Detect native module once ───────────────────────────────────────────────
 
 let _nativeAvailable = false;
 try {
-  require('expo-audio');
+  require('expo-av');
   _nativeAvailable = true;
 } catch (e: any) {
+  const g: any = globalThis as any;
+  const keys = Object.keys(g.expo?.modules ?? {});
+  let ipaInfo = '';
+  try {
+    const App = require('expo-application');
+    ipaInfo = ` | nativeApplicationVersion=${App.nativeApplicationVersion} nativeBuildVersion=${App.nativeBuildVersion} bundleId=${App.applicationId}`;
+  } catch {}
   console.warn(
-    '[audioShim] ExpoAudio require() failed — voice recording disabled. Error:',
+    '[audioShim] expo-av require() failed — voice recording disabled. Error:',
     e?.message ?? e,
-    e?.stack ? '\n' + String(e.stack).split('\n').slice(0, 6).join('\n') : ''
+    `\n  globalThis.expo.modules keys (${keys.length}): ${keys.join(', ') || '(empty)'}`,
+    ipaInfo
   );
 }
 
 export const isAudioAvailable = _nativeAvailable;
 
-// ─── Stub recorder — matches the shape returned by useAudioRecorder ──────────
+// ─── Recorder handle shape (what CaptureBar consumes) ────────────────────────
 
-const STUB_RECORDER = {
+interface RecorderHandle {
+  prepareToRecordAsync: () => Promise<void>;
+  record: () => void;
+  stop: () => Promise<void>;
+  readonly uri: string | null;
+}
+
+const STUB_RECORDER: RecorderHandle = {
   prepareToRecordAsync: async () => {},
   record: () => {},
   stop: async () => {},
-  uri: null as string | null,
+  uri: null,
 };
 
-// ─── Hook — defined once per availability state so rules-of-hooks are upheld ─
-//
-// The same function reference is used for every render of every component that
-// calls useSafeAudioRecorder. Because _nativeAvailable is a constant (set once
-// at module load, never changes), React's "same hooks in same order" invariant
-// is always satisfied.
+// ─── Hook — same hook order across renders (constant native-availability) ────
 
-let _useAudioRecorderImpl: () => typeof STUB_RECORDER;
+let _useAudioRecorderImpl: () => RecorderHandle;
 
 if (_nativeAvailable) {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { useAudioRecorder, RecordingPresets } = require('expo-audio');
-  _useAudioRecorderImpl = () => useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  _useAudioRecorderImpl = () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { Audio } = require('expo-av');
+    const stateRef = useRef<{ instance: any; uri: string | null }>({
+      instance: null,
+      uri: null,
+    });
+
+    return {
+      prepareToRecordAsync: async () => {
+        const r = new Audio.Recording();
+        await r.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+        stateRef.current.instance = r;
+        stateRef.current.uri = null;
+      },
+      record: () => {
+        stateRef.current.instance?.startAsync();
+      },
+      stop: async () => {
+        const r = stateRef.current.instance;
+        if (!r) return;
+        try {
+          await r.stopAndUnloadAsync();
+          stateRef.current.uri = r.getURI();
+        } finally {
+          stateRef.current.instance = null;
+        }
+      },
+      get uri() {
+        return stateRef.current.uri;
+      },
+    };
+  };
 } else {
   _useAudioRecorderImpl = () => STUB_RECORDER;
 }
@@ -61,15 +100,24 @@ export const useSafeAudioRecorder = _useAudioRecorderImpl;
 export async function safeRequestPermissions(): Promise<{ granted: boolean }> {
   if (!_nativeAvailable) return { granted: false };
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { requestRecordingPermissionsAsync } = require('expo-audio');
-  return requestRecordingPermissionsAsync();
+  const { Audio } = require('expo-av');
+  const result = await Audio.requestPermissionsAsync();
+  return { granted: !!result?.granted };
 }
 
+/**
+ * Accepts the expo-audio-style option names (playsInSilentMode, allowsRecording)
+ * for backwards compatibility with CaptureBar's call sites and maps to expo-av's
+ * iOS-suffixed names.
+ */
 export async function safeSetAudioMode(
-  options: Record<string, boolean>
+  options: { playsInSilentMode?: boolean; allowsRecording?: boolean }
 ): Promise<void> {
   if (!_nativeAvailable) return;
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { setAudioModeAsync } = require('expo-audio');
-  return setAudioModeAsync(options);
+  const { Audio } = require('expo-av');
+  const mapped: Record<string, boolean> = {};
+  if (options.playsInSilentMode !== undefined) mapped.playsInSilentModeIOS = options.playsInSilentMode;
+  if (options.allowsRecording !== undefined) mapped.allowsRecordingIOS = options.allowsRecording;
+  return Audio.setAudioModeAsync(mapped);
 }

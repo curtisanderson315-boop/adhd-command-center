@@ -27,16 +27,16 @@ const SUGGESTIONS_KEY = '@adhd:suggestions';
 const LAST_SCAN_AT_KEY = '@adhd:lastScanAt';
 
 // ─── Lazy-load native background modules so a missing native binary doesn't
-//     crash the app at startup. Both expo-background-task and expo-task-manager
+//     crash the app at startup. Both expo-background-fetch and expo-task-manager
 //     require the native module to be present in the IPA — if it's not linked
 //     (e.g. older dev build), we degrade gracefully instead of throwing. ─────
 
-let BackgroundTask: typeof import('expo-background-task') | null = null;
+let BackgroundFetch: typeof import('expo-background-fetch') | null = null;
 let TaskManager: typeof import('expo-task-manager') | null = null;
 
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  BackgroundTask = require('expo-background-task');
+  BackgroundFetch = require('expo-background-fetch');
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   TaskManager = require('expo-task-manager');
 } catch (e: any) {
@@ -49,14 +49,16 @@ try {
 
 // ─── Define the task at module scope (only when native module is present) ──
 
-if (TaskManager && BackgroundTask) {
+if (TaskManager && BackgroundFetch) {
   TaskManager.defineTask(ADHD_EMAIL_POLL, async () => {
     try {
-      await runEmailPoll();
-      return BackgroundTask!.BackgroundTaskResult.Success;
+      const hadNew = await runEmailPoll();
+      return hadNew
+        ? BackgroundFetch!.BackgroundFetchResult.NewData
+        : BackgroundFetch!.BackgroundFetchResult.NoData;
     } catch (e) {
       console.warn('[BackgroundPoll] failed:', e);
-      return BackgroundTask!.BackgroundTaskResult.Failed;
+      return BackgroundFetch!.BackgroundFetchResult.Failed;
     }
   });
 }
@@ -177,12 +179,11 @@ async function runSmartScan(settings: AppSettings, rawEmails: any[]): Promise<vo
  * Register the background task. Safe to call repeatedly — re-registering
  * with a new interval replaces the previous schedule. Pass 0 to unregister.
  *
- * Note: `minimumInterval` is in MINUTES in expo-background-task (was seconds
- * in the deprecated expo-background-fetch). iOS enforces a 15-minute floor
- * regardless of what we pass.
+ * Note: `minimumInterval` is in SECONDS in expo-background-fetch. iOS enforces
+ * a ~15-minute floor regardless of what we pass.
  */
 export async function registerBackgroundPolling(intervalMinutes: number): Promise<void> {
-  if (!TaskManager || !BackgroundTask) return; // native module not available
+  if (!TaskManager || !BackgroundFetch) return; // native module not available
   if (intervalMinutes <= 0) {
     await unregisterBackgroundPolling();
     return;
@@ -190,10 +191,12 @@ export async function registerBackgroundPolling(intervalMinutes: number): Promis
   try {
     const isRegistered = await TaskManager.isTaskRegisteredAsync(ADHD_EMAIL_POLL);
     if (isRegistered) {
-      await BackgroundTask.unregisterTaskAsync(ADHD_EMAIL_POLL);
+      await BackgroundFetch.unregisterTaskAsync(ADHD_EMAIL_POLL);
     }
-    await BackgroundTask.registerTaskAsync(ADHD_EMAIL_POLL, {
-      minimumInterval: Math.max(15, intervalMinutes),
+    await BackgroundFetch.registerTaskAsync(ADHD_EMAIL_POLL, {
+      minimumInterval: Math.max(15, intervalMinutes) * 60, // seconds
+      stopOnTerminate: false,
+      startOnBoot: true,
     });
   } catch (e) {
     console.warn('[BackgroundPoll] register failed:', e);
@@ -201,11 +204,11 @@ export async function registerBackgroundPolling(intervalMinutes: number): Promis
 }
 
 export async function unregisterBackgroundPolling(): Promise<void> {
-  if (!TaskManager || !BackgroundTask) return; // native module not available
+  if (!TaskManager || !BackgroundFetch) return; // native module not available
   try {
     const isRegistered = await TaskManager.isTaskRegisteredAsync(ADHD_EMAIL_POLL);
     if (isRegistered) {
-      await BackgroundTask.unregisterTaskAsync(ADHD_EMAIL_POLL);
+      await BackgroundFetch.unregisterTaskAsync(ADHD_EMAIL_POLL);
     }
   } catch (e) {
     console.warn('[BackgroundPoll] unregister failed:', e);
