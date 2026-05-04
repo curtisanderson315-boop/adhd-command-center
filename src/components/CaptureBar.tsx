@@ -2,14 +2,14 @@
  * CaptureBar — the persistent bottom voice/text input strip.
  *
  * Voice flow:
- *   1. Press-and-hold the mic → expo-av starts recording
+ *   1. Press-and-hold the mic → expo-audio starts recording
  *   2. Release → attempt transcription via ai.transcribeAudio
  *   3. On null/error → fall back to the text input (iOS keyboard mic still works)
  *
  * Both paths converge on processVoiceInput → store + routing + spoken confirmation.
  */
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -30,7 +30,12 @@ import Animated, {
   cancelAnimation,
   Easing,
 } from 'react-native-reanimated';
-import { Audio } from 'expo-av';
+import {
+  useAudioRecorder,
+  requestRecordingPermissionsAsync,
+  setAudioModeAsync,
+  RecordingPresets,
+} from 'expo-audio';
 import * as Speech from 'expo-speech';
 import { colors, spacing, radius } from '../theme';
 import { processVoiceInput, transcribeAudio } from '../services/ai';
@@ -41,32 +46,6 @@ import { getSavedEmail, isSignedIn } from '../services/auth';
 import { nanoid } from '../services/utils';
 import type { CapturedAction, Task, Note } from '../types';
 
-const RECORDING_OPTIONS: Audio.RecordingOptions = {
-  android: {
-    extension: '.m4a',
-    outputFormat: Audio.AndroidOutputFormat.MPEG_4,
-    audioEncoder: Audio.AndroidAudioEncoder.AAC,
-    sampleRate: 44100,
-    numberOfChannels: 2,
-    bitRate: 128000,
-  },
-  ios: {
-    extension: '.m4a',
-    outputFormat: Audio.IOSOutputFormat.MPEG4AAC,
-    audioQuality: Audio.IOSAudioQuality.HIGH,
-    sampleRate: 44100,
-    numberOfChannels: 2,
-    bitRate: 128000,
-    linearPCMBitDepth: 16,
-    linearPCMIsBigEndian: false,
-    linearPCMIsFloat: false,
-  },
-  web: {
-    mimeType: 'audio/webm',
-    bitsPerSecond: 128000,
-  },
-};
-
 export function CaptureBar() {
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -74,7 +53,7 @@ export function CaptureBar() {
   const [showTextInput, setShowTextInput] = useState(false);
   const [textHint, setTextHint] = useState<string | null>(null);
 
-  const recordingRef = useRef<Audio.Recording | null>(null);
+  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const pulse = useSharedValue(0);
   const micScale = useSharedValue(1);
 
@@ -237,7 +216,7 @@ export function CaptureBar() {
   const startRecording = async () => {
     if (isRecording || isProcessing) return;
     try {
-      const perm = await Audio.requestPermissionsAsync();
+      const perm = await requestRecordingPermissionsAsync();
       if (!perm.granted) {
         Alert.alert(
           'Microphone access needed',
@@ -245,15 +224,13 @@ export function CaptureBar() {
         );
         return;
       }
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
+      await setAudioModeAsync({
+        playsInSilentMode: true,
+        allowsRecording: true,
       });
 
-      const recording = new Audio.Recording();
-      await recording.prepareToRecordAsync(RECORDING_OPTIONS);
-      await recording.startAsync();
-      recordingRef.current = recording;
+      await recorder.prepareToRecordAsync();
+      recorder.record();
 
       micScale.value = withTiming(1.15, { duration: 150 });
       setIsRecording(true);
@@ -264,16 +241,12 @@ export function CaptureBar() {
   };
 
   const stopRecording = async (): Promise<string | null> => {
-    const recording = recordingRef.current;
-    recordingRef.current = null;
     micScale.value = withTiming(1, { duration: 150 });
     setIsRecording(false);
-
-    if (!recording) return null;
     try {
-      await recording.stopAndUnloadAsync();
-      await Audio.setAudioModeAsync({ allowsRecordingIOS: false });
-      return recording.getURI();
+      await recorder.stop();
+      await setAudioModeAsync({ allowsRecording: false });
+      return recorder.uri ?? null;
     } catch (e: any) {
       console.warn('Recording stop failed:', e?.message ?? e);
       return null;
@@ -285,7 +258,7 @@ export function CaptureBar() {
   };
 
   const onMicPressOut = async () => {
-    if (!isRecording && !recordingRef.current) return;
+    if (!isRecording) return;
 
     const uri = await stopRecording();
     if (!uri) {
