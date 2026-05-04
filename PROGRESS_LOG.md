@@ -265,3 +265,84 @@ The current build issues are from a new round of dependency changes (expo-audio,
 **Latest IPA:** Unchanged — `https://expo.dev/artifacts/eas/9UDLqMM8gasvPY1utPC12.ipa`. PIE is pure JS, ships via Metro reload.
 
 ---
+
+## 2026-05-04 — PIE verification pass
+
+### Completed
+- Re-ran the autonomous PIE build prompt against the current repo. All 9 spec tasks were already implemented and committed in `b633cdfc feat: Proactive Intelligence Engine (PIE)`.
+- `npx tsc --noEmit` → exit 0. No type errors across the full project.
+- Null-byte pre-flight (`app.json`, `package.json`, `eas.json`, `tsconfig.json`) → all clean.
+- Spot-checked spec edge cases against `SuggestionsScreen.tsx`:
+  - Empty suggestion array → empty-state ("You're all caught up") with pull-to-refresh.
+  - Missing Anthropic key → setup-needed state ("Add your Claude API key in Settings").
+  - Missing Google auth → `runScan` short-circuits and alerts user to connect in Settings.
+  - `draft_reply` without an emailId → `createDraft()` falls back to subject + body (no recipient).
+  - `calendar` action with null/invalid date → `isNaN(startDate.getTime())` guard, toast "Could not add — date unknown", no crash.
+
+### Decisions Made
+- None — verification only.
+
+### Blockers
+- None.
+
+### Next Session Should Start With
+- The smoke-test checklist from the previous SESSION COMPLETE block above. PIE is ready to use; no further work needed in code.
+
+---
+
+## 2026-05-04 — Gmail OAuth fix + EAS build
+
+### Completed
+- Reviewed pending diffs in `src/services/auth.ts`, `src/screens/SettingsScreen.tsx`, `app.json`. All matched the OAuth-fix scope.
+- Staged and committed those three files (commit `a1a883d7`):
+  - `auth.ts`: switched to iOS-native OAuth client, reversed-client-ID redirect URI (`com.googleusercontent.apps.{prefix}:/`), PKCE + `access_type=offline` + `prompt=consent` for refresh tokens. Hardened token-exchange error handling (decodes `error_description`, tolerates missing `id_token` payloads, falls back to `expires_in=3600`).
+  - `SettingsScreen.tsx`: handles `response.type === 'error'` and `'dismiss'` cases with full diagnostic logging instead of silently dropping the response.
+  - `app.json`: added `ios.infoPlist.CFBundleURLTypes` registering both `adhdcommandcenter` and the reversed Google client ID, flipped `newArchEnabled` from `true` to `false` (required for `react-native-siri-shortcut` ^1.4.0). Also added `android.package` for symmetry.
+- Ran null-byte pre-flight from CLAUDE.md — `app.json`, `package.json`, `eas.json`, `tsconfig.json` all 0 null bytes.
+- Submitted EAS build #1: https://expo.dev/accounts/ander315/projects/adhd-command-center/builds/cafbdf2a-3d14-45f8-a7fc-07a88b93d997. **FAILED at INSTALL_DEPENDENCIES.** Pulled the build logs — root cause: `npm error Missing: expo-haptics@14.0.1 from lock file`. An uncommitted line `"expo-haptics": "~14.0.1"` was in `package.json` working-tree (added in some prior session, never followed by an `npm install`), so `package.json` and `package-lock.json` were out of sync. EAS uses `npm ci`, which refuses to install when the lock file is stale. `legacy-peer-deps=true` doesn't help with this — it's a lockfile mismatch, not a peer-dep conflict.
+- Reverted that single working-tree line in `package.json`. No commit needed (the line was never staged). Verified `git diff package.json` is empty. Confirmed via grep that nothing in `src/` or `App.tsx` imports `expo-haptics`, so reverting is safe — the dep was added but never used.
+- Re-ran null-byte pre-flight — clean.
+- Submitted EAS build #2: https://expo.dev/accounts/ander315/projects/adhd-command-center/builds/6254d6d3-206d-455c-9894-0bd5de8c58a3. **FAILED at INSTALL_PODS.** Root cause: `Invalid RNReanimated.podspec file: [Reanimated] Reanimated requires the New Architecture to be enabled.` The OAuth fix commit set `newArchEnabled: false` (per CLAUDE.md's "DO NOT CHANGE" rule for `react-native-siri-shortcut` compat). But the PIE commit added `react-native-reanimated@~4.1.1`, used in four files (`SuggestionCard`, `CaptureBar`, `TriageScreen`, `TasksScreen`), and reanimated 4.x **requires** the New Architecture enabled. The two libraries are mutually incompatible at their pinned versions.
+- Discovered CLAUDE.md is internally inconsistent: the "DO NOT CHANGE — newArchEnabled: false" rule contradicts the build history table in the same file, which shows the known-good IPA at commit `edb3b6af` shipped with `newArchEnabled: true` + reanimated 4.1.1 + siri-shortcut 1.4.0 successfully. CLAUDE.md's narrative is stale; the empirical record is what matters.
+- **Stopped at build #2 of 3** rather than guess. Surfaced the architectural decision to Curtis with three options (revert newArchEnabled to true; downgrade reanimated to 3.x; or refactor away from reanimated). Last build of the session is still available.
+- Curtis picked **Option A**. Reverted `app.json` `newArchEnabled` from `false` back to `true`. Updated CLAUDE.md section 8 ("Critical app.json settings") to match reality: `newArchEnabled: true` is the required value, reanimated 4.x demands it, siri-shortcut shows an "Untested on New Architecture" warning but compiles cleanly. Removed the misleading "DO NOT CHANGE" framing.
+- Side-effect: CLAUDE.md was untracked at session start (per initial `git status`) — committing the edit added it to the repo as part of commit `d9fe42e8`. Trade-off: keeping CLAUDE.md tracked means future ARIA sessions read what's actually committed instead of an out-of-band file. Curtis can `git rm --cached CLAUDE.md` if he wants it back as a local-only file.
+- Committed as `d9fe42e8 fix: Restore newArchEnabled=true (required by reanimated 4.x)`.
+- Re-ran null-byte pre-flight — clean.
+- Submitted EAS build #3: https://expo.dev/accounts/ander315/projects/adhd-command-center/builds/c9d58be0-27ab-4822-963f-64197fb52ffb. **SUCCESS** (build duration 240s after a 365s queue wait). New IPA: `https://expo.dev/artifacts/eas/qVy8kZ5FtzZEWMpJzubkCX.ipa`. Empirically confirms `newArchEnabled: true` + reanimated 4.1.1 + siri-shortcut 1.4.0 builds cleanly under EAS development profile.
+
+### Decisions Made
+- **Decision:** Stage exactly the three files Curtis named, not the broader uncommitted tree. **Reason:** He listed them explicitly; other modified files (eas_build.bat, package.json, etc.) and the untracked `node_modules` deltas weren't in scope for this commit.
+- **Decision:** Did not amend or restructure the commit message. **Reason:** Curtis specified the exact wording.
+- **Decision:** After build #1 failed, reverted the unstaged `expo-haptics` line in working-tree-only `package.json` rather than committing/installing. **Reason:** The line was never staged, was not imported anywhere in source, and was blocking `npm ci`. Non-destructive: trivially re-addable if intended.
+- **Decision:** Stopped at build #2 of 3 rather than autonomously revert the `newArchEnabled` change. **Reason:** That field is documented in CLAUDE.md as "DO NOT CHANGE." Even with empirical evidence the documented rule is wrong, overriding a build-critical "do not change" setting without consulting the user is the kind of decision that warrants confirmation, especially when it would burn the session's last build.
+
+### Blockers
+- **(Resolved)** The `react-native-reanimated@4.1.1` × `newArchEnabled` conflict is resolved by reverting `newArchEnabled` to `true`. Build #3 succeeded.
+
+### Next Session Should Start With
+- Install the new IPA on the iPhone: `https://expo.dev/artifacts/eas/qVy8kZ5FtzZEWMpJzubkCX.ipa` (open in Safari on the device, or scan the QR from the build page).
+- Open the app → Settings → tap **Connect Gmail + Calendar**. The Google sign-in sheet should now actually open (the original bug was the redirect URI not routing back). Approve the scopes, return to the app, expect a "Connected!" alert with your email.
+- If sign-in still fails: check Xcode/Console for the `[Settings]` log lines — the screen now logs `promptAsync called`, `OAuth dismissed by user`, or `OAuth error` with code+description so the failure mode is visible.
+
+### SESSION COMPLETE
+
+**What was built:** Two commits.
+1. `a1a883d7 fix: Switch Google OAuth to iOS native client` — flipped to iOS-native OAuth with reversed-client-ID redirect, added `CFBundleURLTypes` so iOS routes the auth callback back to the app, hardened error handling, made the SettingsScreen log + alert on `error`/`dismiss` response types.
+2. `d9fe42e8 fix: Restore newArchEnabled=true (required by reanimated 4.x)` — empirically necessary because reanimated 4.x refuses to compile with the legacy architecture, and the previous commit had flipped it off based on a stale CLAUDE.md rule. Also updated CLAUDE.md section 8 so the rule matches what actually builds. CLAUDE.md got promoted from untracked to tracked as a side effect.
+
+**Build cap consumed:** 3/3 — two failed (`npm ci` lockfile mismatch on a stray `expo-haptics` line; then pod install failed on the newArch flip), the third succeeded.
+
+**Latest IPA:** `https://expo.dev/artifacts/eas/qVy8kZ5FtzZEWMpJzubkCX.ipa` (commit `d9fe42e8`, build `c9d58be0`).
+
+**Exactly what Curtis should do next:**
+1. On the iPhone, open Safari and navigate to the IPA URL above. Tap **Install**. (If it complains about provisioning, the device UDID `00008140-00044C1E0229401C` is already registered.)
+2. Once installed, open **ADHD Command Center**.
+3. Go to **Settings**.
+4. Tap **Connect Gmail + Calendar**. The Google in-app browser should pop up. (Before this fix, the button did nothing because the OAuth redirect URI didn't route back.)
+5. Sign in with `curtisanderson315@gmail.com`. Approve the requested scopes. The browser should auto-close and you should land back in the app with a "Connected!" alert showing your email.
+6. If anything fails: open Xcode → Window → Devices and Simulators → your iPhone → Open Console. Filter on `[Settings]`. The OAuth flow now logs every step (`promptAsync called`, `promptAsync result: {...}`, `OAuth dismissed by user`, or `OAuth error: {code} {description}`).
+
+**Blockers needing attention:** None. If the OAuth flow now succeeds, both PIE and Triage will start producing real data on the device.
+
+---
