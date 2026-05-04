@@ -9,6 +9,7 @@ import * as Notifications from 'expo-notifications';
 import type { NavigationContainerRef } from '@react-navigation/native';
 
 import { HomeScreen } from './src/screens/HomeScreen';
+import { SuggestionsScreen } from './src/screens/SuggestionsScreen';
 import { TriageScreen } from './src/screens/TriageScreen';
 import { TasksScreen } from './src/screens/TasksScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
@@ -23,10 +24,11 @@ import {
 const Tab = createBottomTabNavigator();
 
 const TABS = [
-  { name: 'Home',     component: HomeScreen,     icon: '🏠', label: 'Home'     },
-  { name: 'Triage',   component: TriageScreen,   icon: '📥', label: 'Triage'   },
-  { name: 'Tasks',    component: TasksScreen,    icon: '✅', label: 'Tasks'    },
-  { name: 'Settings', component: SettingsScreen, icon: '⚙️', label: 'Settings' },
+  { name: 'Home',        component: HomeScreen,        icon: '🏠', label: 'Home'     },
+  { name: 'Suggestions', component: SuggestionsScreen, icon: '✨', label: 'Smart'    },
+  { name: 'Triage',      component: TriageScreen,      icon: '📥', label: 'Triage'   },
+  { name: 'Tasks',       component: TasksScreen,       icon: '✅', label: 'Tasks'    },
+  { name: 'Settings',    component: SettingsScreen,    icon: '⚙️', label: 'Settings' },
 ];
 
 // Show banner + sound + badge when a notification arrives in the foreground
@@ -44,8 +46,11 @@ export default function App() {
   const hydrate = useAppStore((s) => s.hydrate);
   const triageQueue = useAppStore((s) => s.triageQueue);
   const tasks = useAppStore((s) => s.tasks);
+  const suggestions = useAppStore((s) => s.suggestions);
   const triageInterval = useAppStore((s) => s.settings.triageIntervalMinutes);
   const navRef = useRef<NavigationContainerRef<any>>(null);
+
+  const pendingSuggestionsCount = suggestions.filter((s) => s.status === 'pending').length;
 
   // ── Bootstrap: hydrate, register Siri, wire notification taps ──────────
   useEffect(() => {
@@ -154,6 +159,16 @@ export default function App() {
                         tabBarBadgeStyle: {
                           backgroundColor: colors.actionNeeded,
                           color: '#000',
+                          fontSize: 11,
+                        },
+                      }
+                    : tab.name === 'Suggestions'
+                    ? {
+                        tabBarBadge:
+                          pendingSuggestionsCount > 0 ? pendingSuggestionsCount : undefined,
+                        tabBarBadgeStyle: {
+                          backgroundColor: colors.purple,
+                          color: '#fff',
                           fontSize: 11,
                         },
                       }

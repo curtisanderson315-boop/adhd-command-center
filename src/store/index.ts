@@ -6,6 +6,7 @@ import type {
   Task,
   Note,
   AppSettings,
+  SmartSuggestion,
 } from '../types';
 import { getStoredTriageQueue } from '../services/background';
 
@@ -38,6 +39,14 @@ interface AppState {
   settings: AppSettings;
   updateSettings: (updates: Partial<AppSettings>) => Promise<void>;
 
+  // ── Smart Suggestions (Proactive Intelligence Engine) ────────────────────
+  suggestions: SmartSuggestion[];
+  lastScanAt: string | null;
+  setSuggestions: (suggestions: SmartSuggestion[]) => Promise<void>;
+  dismissSuggestion: (id: string) => Promise<void>;
+  actionSuggestion: (id: string) => Promise<void>;
+  setLastScanAt: (ts: string) => Promise<void>;
+
   // ── Bootstrap ─────────────────────────────────────────────────────────────
   hydrate: () => Promise<void>;
 }
@@ -59,6 +68,8 @@ const STORAGE_KEYS = {
   settings: '@adhd:settings',
   lastTriageAt: '@adhd:lastTriageAt',
   triageQueue: '@adhd:triageQueue',
+  suggestions: '@adhd:suggestions',
+  lastScanAt: '@adhd:lastScanAt',
 };
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -68,6 +79,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   tasks: [],
   notes: [],
   settings: DEFAULT_SETTINGS,
+  suggestions: [],
+  lastScanAt: null,
 
   // ── Captures ───────────────────────────────────────────────────────────────
   addCapture: async (action) => {
@@ -149,18 +162,61 @@ export const useAppStore = create<AppState>((set, get) => ({
     await AsyncStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(updated));
   },
 
+  // ── Smart Suggestions ──────────────────────────────────────────────────────
+  setSuggestions: async (incoming) => {
+    // Merge with existing, dedupe by id (newer entry wins)
+    const existing = get().suggestions;
+    const byId = new Map<string, SmartSuggestion>();
+    for (const s of existing) byId.set(s.id, s);
+    for (const s of incoming) byId.set(s.id, s);
+    const merged = Array.from(byId.values());
+    set({ suggestions: merged });
+    await AsyncStorage.setItem(STORAGE_KEYS.suggestions, JSON.stringify(merged));
+  },
+
+  dismissSuggestion: async (id) => {
+    const updated = get().suggestions.map((s) =>
+      s.id === id ? { ...s, status: 'dismissed' as const } : s
+    );
+    set({ suggestions: updated });
+    await AsyncStorage.setItem(STORAGE_KEYS.suggestions, JSON.stringify(updated));
+  },
+
+  actionSuggestion: async (id) => {
+    const updated = get().suggestions.map((s) =>
+      s.id === id ? { ...s, status: 'actioned' as const } : s
+    );
+    set({ suggestions: updated });
+    await AsyncStorage.setItem(STORAGE_KEYS.suggestions, JSON.stringify(updated));
+  },
+
+  setLastScanAt: async (ts) => {
+    set({ lastScanAt: ts });
+    await AsyncStorage.setItem(STORAGE_KEYS.lastScanAt, ts);
+  },
+
   // ── Hydrate from storage ───────────────────────────────────────────────────
   hydrate: async () => {
     try {
-      const [captures, tasks, notes, settings, lastTriageAt, backgroundQueue] =
-        await Promise.all([
-          AsyncStorage.getItem(STORAGE_KEYS.captures),
-          AsyncStorage.getItem(STORAGE_KEYS.tasks),
-          AsyncStorage.getItem(STORAGE_KEYS.notes),
-          AsyncStorage.getItem(STORAGE_KEYS.settings),
-          AsyncStorage.getItem(STORAGE_KEYS.lastTriageAt),
-          getStoredTriageQueue(),
-        ]);
+      const [
+        captures,
+        tasks,
+        notes,
+        settings,
+        lastTriageAt,
+        backgroundQueue,
+        suggestions,
+        lastScanAt,
+      ] = await Promise.all([
+        AsyncStorage.getItem(STORAGE_KEYS.captures),
+        AsyncStorage.getItem(STORAGE_KEYS.tasks),
+        AsyncStorage.getItem(STORAGE_KEYS.notes),
+        AsyncStorage.getItem(STORAGE_KEYS.settings),
+        AsyncStorage.getItem(STORAGE_KEYS.lastTriageAt),
+        getStoredTriageQueue(),
+        AsyncStorage.getItem(STORAGE_KEYS.suggestions),
+        AsyncStorage.getItem(STORAGE_KEYS.lastScanAt),
+      ]);
 
       set({
         captures: captures ? JSON.parse(captures) : [],
@@ -171,6 +227,8 @@ export const useAppStore = create<AppState>((set, get) => ({
           : DEFAULT_SETTINGS,
         lastTriageAt: lastTriageAt ? Number(lastTriageAt) : null,
         triageQueue: backgroundQueue,
+        suggestions: suggestions ? JSON.parse(suggestions) : [],
+        lastScanAt: lastScanAt ?? null,
       });
     } catch (e) {
       console.error('Failed to hydrate store:', e);

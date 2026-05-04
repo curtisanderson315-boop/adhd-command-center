@@ -88,3 +88,33 @@ export interface AppSettings {
   triageIntervalMinutes: number;  // default 15
   notificationsEnabled: boolean;
 }
+
+// ─── Smart Suggestions (Proactive Intelligence Engine) ─────────────────────
+
+export type SuggestionType =
+  | 'add_to_calendar'
+  | 'purchase'
+  | 'book_travel'
+  | 'reply_needed'
+  | 'overdue_task'
+  | 'follow_up';
+
+export type SuggestionAction =
+  | { type: 'calendar'; event: { title: string; date: string | null; durationMinutes: number; notes?: string } }
+  | { type: 'amazon'; searchQuery: string; productDescription: string }
+  | { type: 'flights'; destination: string; departureDateISO: string | null; returnDateISO: string | null }
+  | { type: 'draft_reply'; emailId: string; subject: string; draftBody: string }
+  | { type: 'task'; taskTitle: string; notes?: string }
+  | { type: 'none' };
+
+export interface SmartSuggestion {
+  id: string;
+  type: SuggestionType;
+  title: string;
+  context: string;
+  urgency: 'high' | 'medium' | 'low';
+  action: SuggestionAction;
+  sourceEmailId?: string | null;
+  createdAt: string;
+  status: 'pending' | 'actioned' | 'dismissed';
+}

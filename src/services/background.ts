@@ -10,31 +10,52 @@
  * React rendering, so the OS can re-execute the task body on a cold launch.
  */
 
-import * as BackgroundTask from 'expo-background-task';
-import * as TaskManager from 'expo-task-manager';
 import * as Notifications from 'expo-notifications';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import type { AppSettings, TriagedEmail } from '../types';
+import type { AppSettings, SmartSuggestion, TriagedEmail } from '../types';
 import { fetchUnreadEmails } from './gmail';
 import { triageEmail } from './ai';
+import { fetchUpcomingEvents } from './calendar';
+import { dedupKey, scanForSuggestions } from './smartScan';
 
 export const ADHD_EMAIL_POLL = 'ADHD_EMAIL_POLL';
 export const NOTIFICATION_TAP_ROUTE = 'ADHD_NOTIFICATION_ROUTE';
 
 const SETTINGS_KEY = '@adhd:settings';
 const TRIAGE_QUEUE_KEY = '@adhd:triageQueue';
+const SUGGESTIONS_KEY = '@adhd:suggestions';
+const LAST_SCAN_AT_KEY = '@adhd:lastScanAt';
 
-// ─── Define the task at module scope ────────────────────────────────────
+// ─── Lazy-load native background modules so a missing native binary doesn't
+//     crash the app at startup. Both expo-background-task and expo-task-manager
+//     require the native module to be present in the IPA — if it's not linked
+//     (e.g. older dev build), we degrade gracefully instead of throwing. ─────
 
-TaskManager.defineTask(ADHD_EMAIL_POLL, async () => {
-  try {
-    await runEmailPoll();
-    return BackgroundTask.BackgroundTaskResult.Success;
-  } catch (e) {
-    console.warn('[BackgroundPoll] failed:', e);
-    return BackgroundTask.BackgroundTaskResult.Failed;
-  }
-});
+let BackgroundTask: typeof import('expo-background-task') | null = null;
+let TaskManager: typeof import('expo-task-manager') | null = null;
+
+try {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  BackgroundTask = require('expo-background-task');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  TaskManager = require('expo-task-manager');
+} catch {
+  console.warn('[BackgroundPoll] Native background-task module not available — background polling disabled.');
+}
+
+// ─── Define the task at module scope (only when native module is present) ──
+
+if (TaskManager && BackgroundTask) {
+  TaskManager.defineTask(ADHD_EMAIL_POLL, async () => {
+    try {
+      await runEmailPoll();
+      return BackgroundTask!.BackgroundTaskResult.Success;
+    } catch (e) {
+      console.warn('[BackgroundPoll] failed:', e);
+      return BackgroundTask!.BackgroundTaskResult.Failed;
+    }
+  });
+}
 
 // ─── Poll body ──────────────────────────────────────────────────────────
 
@@ -47,33 +68,103 @@ async function runEmailPoll(): Promise<boolean> {
   if (settings.triageIntervalMinutes === 0) return false; // Manual mode
 
   const rawEmails = await fetchUnreadEmails(15);
-  if (rawEmails.length === 0) return false;
 
-  const triaged: TriagedEmail[] = await Promise.all(
-    rawEmails.map((e) => triageEmail(e, settings.anthropicKey))
-  );
+  // ── Step 1: Triage new emails (existing path) ────────────────────────────
+  let triaged: TriagedEmail[] = [];
+  if (rawEmails.length > 0) {
+    triaged = await Promise.all(
+      rawEmails.map((e) => triageEmail(e, settings.anthropicKey))
+    );
 
-  const order = { urgent: 0, action_needed: 1, fyi: 2, noise: 3 };
-  triaged.sort((a, b) => order[a.priority] - order[b.priority]);
+    const order = { urgent: 0, action_needed: 1, fyi: 2, noise: 3 };
+    triaged.sort((a, b) => order[a.priority] - order[b.priority]);
 
-  await AsyncStorage.setItem(TRIAGE_QUEUE_KEY, JSON.stringify(triaged));
+    await AsyncStorage.setItem(TRIAGE_QUEUE_KEY, JSON.stringify(triaged));
 
-  const urgentCount = triaged.filter(
-    (e) => e.priority === 'urgent' || e.priority === 'action_needed'
-  ).length;
+    const urgentCount = triaged.filter(
+      (e) => e.priority === 'urgent' || e.priority === 'action_needed'
+    ).length;
 
-  if (urgentCount > 0 && settings.notificationsEnabled) {
-    await Notifications.scheduleNotificationAsync({
-      content: {
-        title: urgentCount === 1 ? '📥 1 email needs your attention' : `📥 ${urgentCount} emails need your attention`,
-        body: triaged[0]?.subject ?? 'Open Triage to review',
-        data: { type: NOTIFICATION_TAP_ROUTE, route: 'Triage' },
-      },
-      trigger: null, // immediately
-    });
+    if (urgentCount > 0 && settings.notificationsEnabled) {
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title:
+            urgentCount === 1
+              ? '📥 1 email needs your attention'
+              : `📥 ${urgentCount} emails need your attention`,
+          body: triaged[0]?.subject ?? 'Open Triage to review',
+          data: { type: NOTIFICATION_TAP_ROUTE, route: 'Triage' },
+        },
+        trigger: null,
+      });
+    }
   }
 
+  // ── Step 2: Smart scan (PIE) — non-fatal if it fails ─────────────────────
+  await runSmartScan(settings, rawEmails);
+
   return true;
+}
+
+/**
+ * Run a smart scan + merge results into the persisted suggestions store.
+ * Wrapped so a failure here cannot break the email-triage path above.
+ */
+async function runSmartScan(settings: AppSettings, rawEmails: any[]): Promise<void> {
+  try {
+    const events = await fetchUpcomingEvents(30);
+    if (rawEmails.length === 0 && events.length === 0) return;
+
+    const fresh = await scanForSuggestions(
+      rawEmails,
+      events,
+      settings.userEmail ?? '',
+      settings.anthropicKey
+    );
+    if (fresh.length === 0) {
+      await AsyncStorage.setItem(LAST_SCAN_AT_KEY, new Date().toISOString());
+      return;
+    }
+
+    // Merge with existing — dedupe by (type + normalized title)
+    const rawExisting = await AsyncStorage.getItem(SUGGESTIONS_KEY);
+    const existing: SmartSuggestion[] = rawExisting ? JSON.parse(rawExisting) : [];
+    const seen = new Set<string>();
+    const merged: SmartSuggestion[] = [];
+
+    // Existing first so they keep their id/status
+    for (const s of existing) {
+      const key = dedupKey(s);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(s);
+    }
+
+    const newHigh: SmartSuggestion[] = [];
+    for (const s of fresh) {
+      const key = dedupKey(s);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(s);
+      if (s.urgency === 'high') newHigh.push(s);
+    }
+
+    await AsyncStorage.setItem(SUGGESTIONS_KEY, JSON.stringify(merged));
+    await AsyncStorage.setItem(LAST_SCAN_AT_KEY, new Date().toISOString());
+
+    if (newHigh.length > 0 && settings.notificationsEnabled) {
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: '✨ Something needs your attention',
+          body: newHigh[0]?.title ?? 'Open the Smart tab to review',
+          data: { type: NOTIFICATION_TAP_ROUTE, route: 'Suggestions' },
+        },
+        trigger: null,
+      });
+    }
+  } catch (e) {
+    console.warn('[BackgroundPoll] smartScan failed:', e);
+  }
 }
 
 // ─── Public API ─────────────────────────────────────────────────────────
@@ -87,6 +178,7 @@ async function runEmailPoll(): Promise<boolean> {
  * regardless of what we pass.
  */
 export async function registerBackgroundPolling(intervalMinutes: number): Promise<void> {
+  if (!TaskManager || !BackgroundTask) return; // native module not available
   if (intervalMinutes <= 0) {
     await unregisterBackgroundPolling();
     return;
@@ -105,6 +197,7 @@ export async function registerBackgroundPolling(intervalMinutes: number): Promis
 }
 
 export async function unregisterBackgroundPolling(): Promise<void> {
+  if (!TaskManager || !BackgroundTask) return; // native module not available
   try {
     const isRegistered = await TaskManager.isTaskRegisteredAsync(ADHD_EMAIL_POLL);
     if (isRegistered) {

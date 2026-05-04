@@ -86,28 +86,46 @@ export async function createEvent({
 
 export interface CalendarEvent {
   id: string;
-  title: string;
-  start: string;
-  end: string;
-  description?: string;
+  summary: string;
+  startDateTime: string;   // ISO 8601
+  endDateTime: string;     // ISO 8601
+  location?: string | null;
+  description?: string | null;
 }
 
-export async function getUpcomingEvents(
-  maxResults = 10,
+/**
+ * Fetch upcoming events from the user's primary Google Calendar.
+ * Returns [] on failure rather than throwing — used by the smart-scan path
+ * which must remain fault-tolerant.
+ */
+export async function fetchUpcomingEvents(
+  daysAhead = 30,
   calendarId = 'primary'
 ): Promise<CalendarEvent[]> {
-  const now = new Date().toISOString();
-  const data = await calFetch(
-    `/calendars/${calendarId}/events?timeMin=${now}&maxResults=${maxResults}&singleEvents=true&orderBy=startTime`
-  );
+  try {
+    const now = new Date();
+    const future = new Date(now.getTime() + daysAhead * 24 * 60 * 60 * 1000);
+    const params = new URLSearchParams({
+      timeMin: now.toISOString(),
+      timeMax: future.toISOString(),
+      singleEvents: 'true',
+      orderBy: 'startTime',
+      maxResults: '50',
+    });
+    const data = await calFetch(`/calendars/${calendarId}/events?${params.toString()}`);
 
-  return (data.items ?? []).map((e: any): CalendarEvent => ({
-    id: e.id,
-    title: e.summary ?? '(no title)',
-    start: e.start?.dateTime ?? e.start?.date ?? '',
-    end: e.end?.dateTime ?? e.end?.date ?? '',
-    description: e.description,
-  }));
+    return (data.items ?? []).map((e: any): CalendarEvent => ({
+      id: e.id,
+      summary: e.summary ?? '(no title)',
+      startDateTime: e.start?.dateTime ?? e.start?.date ?? '',
+      endDateTime: e.end?.dateTime ?? e.end?.date ?? '',
+      location: e.location ?? null,
+      description: e.description ?? null,
+    }));
+  } catch (e) {
+    console.warn('[Calendar] fetchUpcomingEvents failed:', e);
+    return [];
+  }
 }
 
 // ─── Delete event ─────────────────────────────────────────────────────────────
