@@ -39,8 +39,12 @@ try {
   BackgroundTask = require('expo-background-task');
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   TaskManager = require('expo-task-manager');
-} catch {
-  console.warn('[BackgroundPoll] Native background-task module not available — background polling disabled.');
+} catch (e: any) {
+  console.warn(
+    '[BackgroundPoll] require() failed — background polling disabled. Error:',
+    e?.message ?? e,
+    e?.stack ? '\n' + String(e.stack).split('\n').slice(0, 6).join('\n') : ''
+  );
 }
 
 // ─── Define the task at module scope (only when native module is present) ──
