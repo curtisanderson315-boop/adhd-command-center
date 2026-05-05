@@ -30,7 +30,7 @@ Write-Host "Starting EAS build (development profile)..." -ForegroundColor Cyan
 Write-Host "EAS will ask for your Apple credentials. Enter them when prompted." -ForegroundColor Yellow
 Write-Host ""
 
-npx eas-cli build --platform ios --profile development
+npx eas-cli build --platform ios --profile development --non-interactive
 
 if ($LASTEXITCODE -eq 0) {
     Write-Host ""
