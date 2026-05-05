@@ -16,6 +16,33 @@ export function buildAmazonSearchUrl(searchQuery: string): string {
 }
 
 /**
+ * Build the canonical Amazon product detail URL for a known ASIN.
+ * The native Amazon iOS app intercepts this link if installed; otherwise it
+ * opens in Safari. Used by Memory-Augmented Action when the contextMiner
+ * extracts an ASIN from a past order email.
+ */
+export function buildAmazonProductUrl(asin: string): string {
+  return `https://www.amazon.com/dp/${encodeURIComponent(asin)}`;
+}
+
+/**
+ * Open Amazon directly to a product page by ASIN. Falls back to a search if
+ * the deep link can't be opened for any reason.
+ */
+export async function openAmazonProduct(asin: string, fallbackQuery?: string): Promise<void> {
+  const productUrl = buildAmazonProductUrl(asin);
+  try {
+    await Linking.openURL(productUrl);
+  } catch {
+    if (fallbackQuery) {
+      await openAmazonSearch(fallbackQuery);
+    } else {
+      await Linking.openURL(`https://www.amazon.com/dp/${asin}`);
+    }
+  }
+}
+
+/**
  * Open Amazon to search for a product.
  * Tries the Amazon app first (if installed), falls back to browser.
  */

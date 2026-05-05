@@ -8,10 +8,12 @@
  *   archiveMessage()     — archive (remove from inbox)
  */
 
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getValidAccessToken } from './auth';
 import { buildMimeMessage, toBase64Url } from './utils';
 
 const GMAIL_BASE = 'https://gmail.googleapis.com/gmail/v1/users/me';
+const EMAIL_CACHE_KEY = '@adhd:emailCache';
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
 
@@ -149,4 +151,111 @@ export async function markAsRead(messageId: string): Promise<void> {
     method: 'POST',
     body: JSON.stringify({ removeLabelIds: ['UNREAD'] }),
   });
+}
+
+// ─── Recent inbox cache (used by contextMiner) ───────────────────────────────
+//
+// The Memory-Augmented Action flow needs sub-3-second access to the user's
+// recent email metadata (id + sender + subject + snippet). Persists under
+// `@adhd:emailCache` so the cache survives a cold launch.
+
+export interface CachedEmailMeta {
+  id: string;
+  from: string;
+  subject: string;
+  snippet: string;
+  receivedAt: string;
+}
+
+interface CacheEnvelope {
+  cachedAt: string;
+  emails: CachedEmailMeta[];
+}
+
+async function readCache(): Promise<CacheEnvelope | null> {
+  try {
+    const raw = await AsyncStorage.getItem(EMAIL_CACHE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeCache(emails: CachedEmailMeta[]): Promise<void> {
+  const envelope: CacheEnvelope = {
+    cachedAt: new Date().toISOString(),
+    emails,
+  };
+  await AsyncStorage.setItem(EMAIL_CACHE_KEY, JSON.stringify(envelope));
+}
+
+/**
+ * Fetch the last ~50 inbox messages as lightweight metadata. If the cache is
+ * fresh (< maxAgeMin), returns it directly. Otherwise calls Gmail with
+ * `format=metadata` to skip body downloads, then persists.
+ *
+ * Returns [] on auth or network error rather than throwing — the contextMiner
+ * has a non-matched fallback path.
+ */
+export async function getRecentInboxCached(
+  maxAgeMin = 30,
+  maxResults = 50
+): Promise<CachedEmailMeta[]> {
+  const cache = await readCache();
+  if (cache) {
+    const ageMs = Date.now() - new Date(cache.cachedAt).getTime();
+    if (ageMs < maxAgeMin * 60 * 1000) {
+      return cache.emails;
+    }
+  }
+
+  try {
+    const listData = await gmailFetch(
+      `/messages?labelIds=INBOX&maxResults=${maxResults}`
+    );
+    if (!listData.messages?.length) {
+      await writeCache([]);
+      return [];
+    }
+
+    const messages = await Promise.all(
+      listData.messages.map((m: { id: string }) =>
+        // metadata format avoids downloading body bytes
+        gmailFetch(
+          `/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`
+        )
+      )
+    );
+
+    const emails: CachedEmailMeta[] = messages.map((msg: any) => {
+      const headers: Record<string, string> = {};
+      (msg.payload?.headers ?? []).forEach((h: { name: string; value: string }) => {
+        headers[h.name.toLowerCase()] = h.value;
+      });
+      return {
+        id: msg.id,
+        from: headers['from'] ?? 'Unknown',
+        subject: headers['subject'] ?? '(no subject)',
+        snippet: msg.snippet ?? '',
+        receivedAt: new Date(Number(msg.internalDate)).toISOString(),
+      };
+    });
+
+    await writeCache(emails);
+    return emails;
+  } catch (e: any) {
+    console.warn('[Gmail] getRecentInboxCached failed:', e?.message ?? e);
+    // Fall back to whatever's in cache, even if stale, so contextMiner still
+    // has something to work with on a flaky connection.
+    return cache?.emails ?? [];
+  }
+}
+
+/**
+ * Force a cache refresh (ignores TTL). Used when the user explicitly pulls
+ * the inbox.
+ */
+export async function refreshRecentInboxCache(maxResults = 50): Promise<CachedEmailMeta[]> {
+  await AsyncStorage.removeItem(EMAIL_CACHE_KEY);
+  return getRecentInboxCached(0, maxResults);
 }

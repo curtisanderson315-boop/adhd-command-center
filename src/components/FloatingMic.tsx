@@ -44,11 +44,12 @@ import * as Speech from 'expo-speech';
 import { colors, spacing, radius } from '../theme';
 import { processVoiceInput, transcribeAudio } from '../services/ai';
 import { useAppStore } from '../store';
-import { createDraft } from '../services/gmail';
+import { createDraft, getRecentInboxCached } from '../services/gmail';
 import { createEvent } from '../services/calendar';
 import { getSavedEmail, isSignedIn } from '../services/auth';
 import { nanoid } from '../services/utils';
-import type { CapturedAction, Task, Note } from '../types';
+import { isContextHinted, mineContextForUtterance } from '../services/contextMiner';
+import type { ActionCard, CapturedAction, Task, Note } from '../types';
 
 export function FloatingMic() {
   const [isRecording, setIsRecording] = useState(false);
@@ -61,7 +62,7 @@ export function FloatingMic() {
   const pulse = useSharedValue(0);
   const micScale = useSharedValue(1);
 
-  const { settings, addCapture, updateCapture, addTask, addNote } = useAppStore();
+  const { settings, addCapture, updateCapture, addTask, addNote, upsertCard } = useAppStore();
 
   // Keep pulse animating while recording
   useEffect(() => {
@@ -177,10 +178,31 @@ export function FloatingMic() {
     }
   };
 
+  // ── Memory-Augmented Action: try contextMiner before falling through to
+  //    the generic CapturedAction path. Returns the rich card if matched.
+
+  const tryContextMine = async (transcript: string): Promise<ActionCard | null> => {
+    if (!isContextHinted(transcript)) return null;
+    if (!(await isSignedIn())) return null;
+    try {
+      const recent = await getRecentInboxCached(30, 50);
+      if (recent.length === 0) return null;
+      const result = await mineContextForUtterance(
+        transcript,
+        recent,
+        settings.anthropicKey
+      );
+      if (result.matched && result.card) {
+        await upsertCard(result.card);
+        return result.card;
+      }
+    } catch (e: any) {
+      console.warn('[FloatingMic] contextMine failed, falling through:', e?.message ?? e);
+    }
+    return null;
+  };
+
   // ── Process transcript / text ──────────────────────────────────────────
-  // NOTE: Phase C inserts a memory-augmented (contextMiner) branch before the
-  // generic CapturedAction flow below. Until that lands, every transcript
-  // takes the legacy path.
 
   const processTranscript = async (text: string) => {
     if (!text.trim()) return;
@@ -194,19 +216,25 @@ export function FloatingMic() {
 
     setIsProcessing(true);
     try {
-      const actions = await processVoiceInput(text, settings.anthropicKey);
+      // Memory-augmented path first — if matched, skip the generic flow.
+      const minedCard = await tryContextMine(text);
+      if (minedCard) {
+        Speech.speak(`Got it. ${minedCard.title}`, { language: 'en-US', rate: 1.0 });
+      } else {
+        const actions = await processVoiceInput(text, settings.anthropicKey);
 
-      for (const action of actions) {
-        await addCapture(action);
-        await routeAction(action);
-      }
+        for (const action of actions) {
+          await addCapture(action);
+          await routeAction(action);
+        }
 
-      const confirmation = actions
-        .map((a) => a.confirmationText)
-        .filter(Boolean)
-        .join('. ');
-      if (confirmation) {
-        Speech.speak(confirmation, { language: 'en-US', rate: 1.0 });
+        const confirmation = actions
+          .map((a) => a.confirmationText)
+          .filter(Boolean)
+          .join('. ');
+        if (confirmation) {
+          Speech.speak(confirmation, { language: 'en-US', rate: 1.0 });
+        }
       }
     } catch (e: any) {
       Alert.alert('Could not understand that', e?.message ?? 'Try again or rephrase.');
