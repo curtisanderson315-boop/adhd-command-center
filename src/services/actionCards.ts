@@ -355,10 +355,17 @@ export function projectAllSources(input: {
   // recording. Other routed types (gmail_draft / calendar_event / note)
   // keep their voice card because nothing else surfaces them locally —
   // the draft lives in Gmail, the event in Google Calendar, etc.
-  const fromCaptures = input.captures
-    .filter((c) => !(c.type === 'task' && c.status === 'routed'))
-    .map(cardFromCapturedAction);
-  const fromTasks = input.tasks.map(cardFromTask);
+  // Iteration 4 fix: voice CapturedActions and Tasks have per-event nanoid
+  // ids, so the same intent recorded twice produces two distinct entities
+  // and projects to two cards. Collapse by content (source + normalized
+  // title), keeping the latest createdAt — the source data stays
+  // untouched, only the rendered surface dedupes.
+  const fromCaptures = collapseByContent(
+    input.captures
+      .filter((c) => !(c.type === 'task' && c.status === 'routed'))
+      .map(cardFromCapturedAction)
+  );
+  const fromTasks = collapseByContent(input.tasks.map(cardFromTask));
   // Skip noise — fyi/noise emails shouldn't bubble into the Now Feed; they
   // stay in the Inbox tab where the user can review at their pace.
   const fromTriage = input.triageQueue
@@ -406,8 +413,39 @@ export function mergeStoredOverlays(
     };
   });
 
-  const manualOnly = stored.filter((c) => !projectedIds.has(c.id));
+  // Iteration 4 fix: collapse manual-overlay duplicates by content. ctx-
+  // cards minted by contextMiner during a session use a nanoid suffix, so
+  // saying "reorder Brita filters" twice in the same session would
+  // surface twice until the next hydrate ran the content-collapse pass.
+  // Doing the collapse here too means in-session repeats don't show.
+  const manualOnly = collapseByContent(
+    stored.filter((c) => !projectedIds.has(c.id))
+  );
   return [...enriched, ...manualOnly];
+}
+
+/**
+ * Collapse ActionCards that share content. The dedupe key is
+ * `${source}|${normalized_title}` — same source AND same intent. Keeps
+ * the entry with the latest createdAt. Used by projectAllSources for
+ * voice/task projections (per-event ids cannot dedupe themselves) and
+ * by mergeStoredOverlays for the manual-overlay path (ctx-/manual-/
+ * bundle- entries from session activity).
+ */
+function collapseByContent<T extends ActionCard>(cards: T[]): T[] {
+  const byKey = new Map<string, T>();
+  for (const c of cards) {
+    const key = `${c.source}|${c.title.toLowerCase().trim().replace(/\s+/g, ' ')}`;
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, c);
+      continue;
+    }
+    const incomingT = new Date(c.createdAt).getTime();
+    const existingT = new Date(existing.createdAt).getTime();
+    if (incomingT >= existingT) byKey.set(key, c);
+  }
+  return Array.from(byKey.values());
 }
 
 /**
