@@ -27,42 +27,57 @@ import { buildAmazonSearchUrl, buildFlightsUrl } from './amazon';
 // ─── Voice / CapturedAction ────────────────────────────────────────────────
 
 export function cardFromCapturedAction(a: CapturedAction): ActionCard {
+  // Bug A from device-testing iteration 2: routed captures (e.g. "voice
+  // note → Gmail draft created") used to project as status 'done', and
+  // NowFeed filters those out — so the user saw the side effect happen
+  // but no card. Now: routed captures stay 'pending' so they surface in
+  // the feed, and primaryAction swaps to mark_done so tapping the button
+  // never re-executes the side effect.
+  const isRouted = a.status === 'routed';
+
   let primary: ActionPayload;
   let secondary: ActionPayload[] | undefined;
 
-  switch (a.type) {
-    case 'gmail_draft':
-      primary = {
-        kind: 'create_draft',
-        emailId: '',
-        subject: a.title,
-        body: a.body ?? '',
-        label: 'Save draft',
-      };
-      break;
+  if (isRouted) {
+    // Side effect already done. Card sits in feed for awareness; tap to
+    // dismiss. Future iteration could deep-link "Open Gmail" / "Open
+    // Calendar", but for v1 a clean ack is enough.
+    primary = { kind: 'mark_done', label: 'Got it' };
+  } else {
+    switch (a.type) {
+      case 'gmail_draft':
+        primary = {
+          kind: 'create_draft',
+          emailId: '',
+          subject: a.title,
+          body: a.body ?? '',
+          label: 'Save draft',
+        };
+        break;
 
-    case 'calendar_event':
-      primary = {
-        kind: 'create_calendar',
-        event: {
-          title: a.title,
-          date: a.date ?? null,
-          durationMinutes: a.durationMinutes ?? 60,
-          notes: a.body ?? undefined,
-        },
-        label: 'Add to calendar',
-      };
-      break;
+      case 'calendar_event':
+        primary = {
+          kind: 'create_calendar',
+          event: {
+            title: a.title,
+            date: a.date ?? null,
+            durationMinutes: a.durationMinutes ?? 60,
+            notes: a.body ?? undefined,
+          },
+          label: 'Add to calendar',
+        };
+        break;
 
-    case 'task':
-      primary = { kind: 'mark_done', label: 'Mark done' };
-      secondary = [{ kind: 'snooze', until: '', label: 'Snooze' }];
-      break;
+      case 'task':
+        primary = { kind: 'mark_done', label: 'Mark done' };
+        secondary = [{ kind: 'snooze', until: '', label: 'Snooze' }];
+        break;
 
-    case 'note':
-    default:
-      primary = { kind: 'mark_done', label: 'Got it' };
-      break;
+      case 'note':
+      default:
+        primary = { kind: 'mark_done', label: 'Got it' };
+        break;
+    }
   }
 
   return {
@@ -70,7 +85,7 @@ export function cardFromCapturedAction(a: CapturedAction): ActionCard {
     source: 'voice',
     title: a.title,
     context: contextFromCapture(a),
-    urgency: urgencyFromPriority(a.priority),
+    urgency: urgencyFromCapture(a),
     primaryAction: primary,
     secondaryActions: secondary,
     firstStep: null,
@@ -88,9 +103,29 @@ function contextFromCapture(a: CapturedAction): string {
 }
 
 function statusFromCapture(s: CapturedAction['status']): ActionCardStatus {
-  if (s === 'routed') return 'done';
+  // 'routed' captures stay pending in the feed (see Bug A note above).
+  // The primary button is mark_done so they don't re-trigger their side
+  // effect on tap.
   if (s === 'dismissed') return 'dismissed';
   return 'pending';
+}
+
+// Voice-capture urgency rule (design call from device-testing iteration 2):
+// "today" is the right default for a voice note captured NOW. Only override
+// if the AI extracted an explicit future date — then derive urgency from
+// proximity. Falls back to the legacy priority-based mapping if no date
+// AND no explicit "today" intent (rare — kept as defense in depth).
+function urgencyFromCapture(a: CapturedAction): ActionUrgency {
+  if (a.date) {
+    const t = new Date(a.date).getTime();
+    if (!isNaN(t)) {
+      const diffDays = (t - Date.now()) / (24 * 60 * 60 * 1000);
+      if (diffDays < 1) return 'today';
+      if (diffDays < 7) return 'this_week';
+      return 'someday';
+    }
+  }
+  return 'today';
 }
 
 // ─── Email triage / TriagedEmail ───────────────────────────────────────────
@@ -266,12 +301,6 @@ function urgencyFromBucket(b: Task['bucket']): ActionUrgency {
 }
 
 // ─── Shared mappers ────────────────────────────────────────────────────────
-
-function urgencyFromPriority(p: 'high' | 'medium' | 'low'): ActionUrgency {
-  if (p === 'high') return 'today';
-  if (p === 'medium') return 'this_week';
-  return 'someday';
-}
 
 function urgencyFromSuggestionUrgency(u: 'high' | 'medium' | 'low'): ActionUrgency {
   if (u === 'high') return 'today';
