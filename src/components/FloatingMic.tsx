@@ -10,7 +10,7 @@
  * same permission flow, same error handling.
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -73,14 +73,33 @@ export function FloatingMic() {
   const [textInput, setTextInput] = useState('');
   const [showTextInput, setShowTextInput] = useState(false);
   const [textHint, setTextHint] = useState<string | null>(null);
+  const [errorToast, setErrorToast] = useState<string | null>(null);
   const driveModeRef = React.useRef(false);
   const driveAutoStopTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const errorToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const recorder = useSafeAudioRecorder();
   const pulse = useSharedValue(0);
   const micScale = useSharedValue(1);
 
   const { settings, addCapture, updateCapture, addTask, addNote, upsertCard } = useAppStore();
+
+  // Surface an inline toast for any transient voice-pipeline failure.
+  // Anti-shame copy. Auto-dismisses so the user doesn't have to dismiss it.
+  // Critical for ADHD UX: silent failure is the worst possible outcome —
+  // the user has to know the phone heard them.
+  const showErrorToast = (message: string) => {
+    console.warn('[FloatingMic][toast]', message);
+    setErrorToast(message);
+    if (errorToastTimerRef.current) clearTimeout(errorToastTimerRef.current);
+    errorToastTimerRef.current = setTimeout(() => setErrorToast(null), 4500);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (errorToastTimerRef.current) clearTimeout(errorToastTimerRef.current);
+    };
+  }, []);
 
   // Keep pulse animating while recording
   useEffect(() => {
@@ -200,16 +219,23 @@ export function FloatingMic() {
   //    the generic CapturedAction path. Returns the rich card if matched.
 
   const tryContextMine = async (transcript: string): Promise<ActionCard | null> => {
-    if (!isContextHinted(transcript)) return null;
-    if (!(await isSignedIn())) return null;
+    const hinted = isContextHinted(transcript);
+    console.log('[FloatingMic][voice] tryContextMine — hinted:', hinted);
+    if (!hinted) return null;
+    if (!(await isSignedIn())) {
+      console.log('[FloatingMic][voice] tryContextMine — not signed in, skip');
+      return null;
+    }
     try {
       const recent = await getRecentInboxCached(30, 50);
+      console.log('[FloatingMic][voice] tryContextMine — recent emails:', recent.length);
       if (recent.length === 0) return null;
       const result = await mineContextForUtterance(
         transcript,
         recent,
         settings.anthropicKey
       );
+      console.log('[FloatingMic][voice] tryContextMine — matched:', result.matched, 'reason:', result.reason);
       if (result.matched && result.card) {
         await upsertCard(result.card);
         return result.card;
@@ -223,7 +249,11 @@ export function FloatingMic() {
   // ── Process transcript / text ──────────────────────────────────────────
 
   const processTranscript = async (text: string) => {
-    if (!text.trim()) return;
+    console.log('[FloatingMic][voice] processTranscript ENTRY — len:', text.trim().length, 'driveMode:', driveModeRef.current);
+    if (!text.trim()) {
+      console.log('[FloatingMic][voice] processTranscript — empty text, abort');
+      return;
+    }
     if (!settings.anthropicKey) {
       Alert.alert(
         'Add your Claude API key',
@@ -238,11 +268,15 @@ export function FloatingMic() {
       // Memory-augmented path first — if matched, skip the generic flow.
       const minedCard = await tryContextMine(text);
       if (minedCard) {
+        console.log('[FloatingMic][voice] mined card upserted:', minedCard.id, minedCard.title);
         Speech.speak(`Got it. ${minedCard.title}`, { language: 'en-US', rate: 1.0 });
       } else {
+        console.log('[FloatingMic][voice] processVoiceInput → Claude');
         const actions = await processVoiceInput(text, settings.anthropicKey);
+        console.log('[FloatingMic][voice] processVoiceInput RETURNED — actions:', actions.length);
 
         for (const action of actions) {
+          console.log('[FloatingMic][voice] addCapture + routeAction:', action.id, action.type, action.title);
           await addCapture(action);
           await routeAction(action);
         }
@@ -257,8 +291,20 @@ export function FloatingMic() {
           Speech.speak(confirmation, { language: 'en-US', rate: 1.0 });
         }
       }
+      console.log('[FloatingMic][voice] processTranscript EXIT — success');
     } catch (e: any) {
-      Alert.alert("Couldn't quite catch that", e?.message ?? 'Try again or rephrase.');
+      // Anti-shame copy. Toast not Alert: ADHD users dismiss alerts
+      // reflexively, then forget they ever happened. A toast lingers
+      // long enough to register but doesn't block the next action.
+      console.warn('[FloatingMic][voice] processTranscript ERROR:', e?.message ?? e, e?.stack?.slice(0, 300));
+      const msg: string = e?.message ?? '';
+      // Pull rate-limit signal out of the message if present so the toast
+      // tells Curtis what actually happened (instead of a generic miss).
+      const rateLimited = /429|rate[_ ]?limit|concurrent/i.test(msg);
+      const userMsg = rateLimited
+        ? "Hit the Claude rate limit. Give it a sec and try again."
+        : "Couldn't pull that up. Try again?";
+      showErrorToast(userMsg);
     } finally {
       driveModeRef.current = false;
       Keyboard.dismiss();
@@ -292,9 +338,11 @@ export function FloatingMic() {
 
       micScale.value = withTiming(1.15, { duration: 150 });
       setIsRecording(true);
+      console.log('[FloatingMic][voice] recording STARTED');
     } catch (e: any) {
-      console.warn('Recording start failed:', e?.message ?? e);
+      console.warn('[FloatingMic][voice] recording start failed:', e?.message ?? e);
       setIsRecording(false);
+      showErrorToast("Couldn't start the mic. Try again?");
     }
   };
 
@@ -304,9 +352,11 @@ export function FloatingMic() {
     try {
       await recorder.stop();
       await safeSetAudioMode({ allowsRecording: false });
-      return recorder.uri ?? null;
+      const uri = recorder.uri ?? null;
+      console.log('[FloatingMic][voice] recording STOPPED — uri:', uri ? `${uri.length} chars` : 'NULL');
+      return uri;
     } catch (e: any) {
-      console.warn('Recording stop failed:', e?.message ?? e);
+      console.warn('[FloatingMic][voice] recording stop failed:', e?.message ?? e);
       return null;
     }
   };
@@ -343,27 +393,28 @@ export function FloatingMic() {
 
     const uri = await stopRecording();
     if (!uri) {
-      Alert.alert(
-        "Voice didn't save",
-        'Try holding the mic again, or tap "Type" to enter it manually.'
-      );
+      showErrorToast("Voice didn't save. Hold the mic again?");
       return;
     }
 
     setIsProcessing(true);
     try {
+      console.log('[FloatingMic][voice] transcribeAudio → Whisper');
       const transcript = await transcribeAudio(uri, settings.openaiKey);
+      console.log('[FloatingMic][voice] Whisper RETURNED — transcript len:', transcript?.length ?? 'null');
       if (transcript) {
         await processTranscript(transcript);
       } else {
-        // No OpenAI key configured.
+        // No OpenAI key configured — keep this as a modal because it
+        // requires the user to take a setup action, not just retry.
         Alert.alert(
           'Add your OpenAI key',
           'Open Settings → Voice Transcription and paste a key from platform.openai.com to enable voice transcription.'
         );
       }
     } catch (e: any) {
-      Alert.alert("Couldn't transcribe", e?.message ?? 'Try again in a moment.');
+      console.warn('[FloatingMic][voice] Whisper ERROR:', e?.message ?? e);
+      showErrorToast(e?.message ?? "Couldn't transcribe. Try again in a moment.");
     } finally {
       setIsProcessing(false);
     }
@@ -397,6 +448,15 @@ export function FloatingMic() {
 
   return (
     <>
+      {errorToast ? (
+        <View style={styles.errorToastWrap} pointerEvents="box-none">
+          <View style={styles.errorToast}>
+            <Text style={styles.errorToastText} numberOfLines={2}>
+              {errorToast}
+            </Text>
+          </View>
+        </View>
+      ) : null}
       <View style={styles.fabWrap} pointerEvents="box-none">
         <View style={styles.micWrap}>
           {isRecording ? (
@@ -488,6 +548,34 @@ const styles = StyleSheet.create({
     right: spacing.md,
     bottom: TAB_BAR_HEIGHT + 12,
     zIndex: 999,
+  },
+  errorToastWrap: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 56 : 24,
+    left: spacing.md,
+    right: spacing.md,
+    zIndex: 1000,
+    alignItems: 'center',
+  },
+  errorToast: {
+    backgroundColor: colors.bgCard,
+    borderColor: colors.urgent,
+    borderWidth: 1,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    shadowColor: '#000',
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 8,
+    maxWidth: 360,
+  },
+  errorToastText: {
+    color: colors.textPrimary,
+    fontSize: 15,
+    fontWeight: '600',
+    textAlign: 'center',
   },
   micWrap: {
     alignItems: 'center',
