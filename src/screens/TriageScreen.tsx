@@ -129,7 +129,7 @@ export function TriageScreen() {
         setTriageQueue(triaged);
         setLastTriageAt(Date.now());
       } catch (e: any) {
-        if (!silent) Alert.alert('Triage error', e?.message ?? 'Something went wrong.');
+        if (!silent) Alert.alert("Couldn't pull that up", e?.message ?? 'Pull to refresh in a moment.');
       } finally {
         setLoading(false);
         setRefreshing(false);
@@ -236,7 +236,7 @@ export function TriageScreen() {
         completeAction(email.id, '😴 Snoozed');
       }
     } catch (e: any) {
-      Alert.alert('Action failed', e?.message ?? 'Try again in a moment.');
+      Alert.alert("Couldn't do that", e?.message ?? 'Try again in a moment.');
     }
   };
 

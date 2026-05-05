@@ -258,7 +258,7 @@ export function FloatingMic() {
         }
       }
     } catch (e: any) {
-      Alert.alert('Could not understand that', e?.message ?? 'Try again or rephrase.');
+      Alert.alert("Couldn't quite catch that", e?.message ?? 'Try again or rephrase.');
     } finally {
       driveModeRef.current = false;
       Keyboard.dismiss();

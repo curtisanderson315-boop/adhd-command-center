@@ -93,7 +93,7 @@ export function SettingsScreen() {
         })
         .catch((e) => {
           console.error('[Settings] Token exchange error:', e?.message ?? e);
-          Alert.alert('Sign-in failed', e?.message ?? 'Unknown error. Check your network and try again.');
+          Alert.alert("Couldn't sign you in", e?.message ?? 'Unknown error. Check your network and try again.');
         });
     } else if (response.type === 'error') {
       // Capture the real Google error for diagnosis
@@ -105,7 +105,7 @@ export function SettingsScreen() {
         ?? '';
       console.error('[Settings] OAuth error:', code, description);
       Alert.alert(
-        'Sign-in failed',
+        "Couldn't sign you in",
         description || `Google returned an error: ${code}. Make sure you have a network connection and try again.`
       );
     } else if (response.type === 'dismiss') {
@@ -316,7 +316,7 @@ export function SettingsScreen() {
                 {testStatus === 'ok'
                   ? '✅ Connected'
                   : testStatus === 'fail'
-                  ? '❌ Test failed — check the key'
+                  ? "❌ Couldn't connect — double-check the key"
                   : 'Test connection'}
               </Text>
             )}
@@ -378,7 +378,7 @@ export function SettingsScreen() {
                 {openaiTestStatus === 'ok'
                   ? '✅ Connected'
                   : openaiTestStatus === 'fail'
-                  ? '❌ Test failed — check the key'
+                  ? "❌ Couldn't connect — double-check the key"
                   : 'Test connection'}
               </Text>
             )}

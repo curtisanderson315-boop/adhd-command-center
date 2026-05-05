@@ -367,9 +367,9 @@ export function TasksScreen() {
         ListEmptyComponent={
           <View style={styles.empty}>
             <Text style={styles.emptyIcon}>🎉</Text>
-            <Text style={styles.emptyTitle}>Nothing in {BUCKETS.find((b) => b.key === activeBucket)?.label}.</Text>
+            <Text style={styles.emptyTitle}>Caught up on {BUCKETS.find((b) => b.key === activeBucket)?.label}.</Text>
             <Text style={styles.emptyText}>
-              Tap + to add a task, or hold the mic to speak one.
+              Nothing pulling at you here. Tap + to add something, or hold the mic to speak one.
             </Text>
             <TouchableOpacity style={styles.emptyAction} onPress={() => setAddOpen(true)}>
               <Text style={styles.emptyActionText}>Add a task</Text>

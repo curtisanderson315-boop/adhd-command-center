@@ -99,10 +99,10 @@ async function runEmailPoll(): Promise<boolean> {
         content: {
           title:
             urgentCount === 1
-              ? '📥 1 email needs your attention'
-              : `📥 ${urgentCount} emails need your attention`,
-          body: triaged[0]?.subject ?? 'Open Triage to review',
-          data: { type: NOTIFICATION_TAP_ROUTE, route: 'Triage' },
+              ? '📥 Quick — 1 email worth a look'
+              : `📥 Quick — ${urgentCount} emails worth a look`,
+          body: triaged[0]?.subject ?? 'Open Inbox when you have a sec',
+          data: { type: NOTIFICATION_TAP_ROUTE, route: 'Inbox' },
         },
         trigger: null,
       });
@@ -190,9 +190,9 @@ async function runSmartScan(settings: AppSettings, rawEmails: any[]): Promise<vo
     if (newHigh.length > 0 && settings.notificationsEnabled) {
       await Notifications.scheduleNotificationAsync({
         content: {
-          title: '✨ Something needs your attention',
-          body: newHigh[0]?.title ?? 'Open the Smart tab to review',
-          data: { type: NOTIFICATION_TAP_ROUTE, route: 'Suggestions' },
+          title: '✨ Quick — want to knock this out?',
+          body: newHigh[0]?.title ?? 'Open Now when you have a sec',
+          data: { type: NOTIFICATION_TAP_ROUTE, route: 'Now' },
         },
         trigger: null,
       });
