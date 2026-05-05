@@ -349,7 +349,15 @@ export function projectAllSources(input: {
   triageQueue: TriagedEmail[];
   suggestions: SmartSuggestion[];
 }): ActionCard[] {
-  const fromCaptures = input.captures.map(cardFromCapturedAction);
+  // Iteration 3 fix: skip voice projections that already routed into a
+  // local Task. The Task itself projects via cardFromTask; rendering the
+  // voice card on top would double up "Got it" + "Mark done" for the same
+  // recording. Other routed types (gmail_draft / calendar_event / note)
+  // keep their voice card because nothing else surfaces them locally —
+  // the draft lives in Gmail, the event in Google Calendar, etc.
+  const fromCaptures = input.captures
+    .filter((c) => !(c.type === 'task' && c.status === 'routed'))
+    .map(cardFromCapturedAction);
   const fromTasks = input.tasks.map(cardFromTask);
   // Skip noise — fyi/noise emails shouldn't bubble into the Now Feed; they
   // stay in the Inbox tab where the user can review at their pace.
