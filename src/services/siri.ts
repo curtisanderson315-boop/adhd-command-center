@@ -41,6 +41,12 @@ const SHORTCUTS: SiriShortcut[] = [
     suggestedInvocationPhrase: 'Show my emails',
     userInfo: { action: 'triage' },
   },
+  {
+    activityType: 'com.curtisanderson.adhdcommandcenter.drivebraindump',
+    title: 'Drive Mode Brain Dump',
+    suggestedInvocationPhrase: 'ARIA brain dump',
+    userInfo: { action: 'drive_brain_dump' },
+  },
 ];
 
 /**

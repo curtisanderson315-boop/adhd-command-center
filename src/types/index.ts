@@ -164,6 +164,20 @@ export type ActionPayload =
   | { kind: 'mark_done'; label: string }
   | { kind: 'snooze'; until: string; label: string };
 
+// ─── Receipt / order memory index (Phase F) ────────────────────────────────
+
+export interface PurchaseRecord {
+  vendor: string;
+  productName: string;
+  asin?: string;
+  price?: string;
+  orderedAt: string;       // ISO 8601
+  emailId: string;
+  rawSubject: string;
+}
+
+// ─── Action Cards (continued) ──────────────────────────────────────────────
+
 export interface ActionCard {
   id: string;
   source: 'voice' | 'email' | 'calendar' | 'smart_scan' | 'manual';

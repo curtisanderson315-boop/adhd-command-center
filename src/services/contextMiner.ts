@@ -13,8 +13,9 @@
  *   2. Live Gmail search via the cached recent inbox (this file today).
  */
 
-import type { ActionCard, ActionPayload } from '../types';
+import type { ActionCard, ActionPayload, PurchaseRecord } from '../types';
 import { nanoid } from './utils';
+import { findInPurchaseIndex } from './receiptIndex';
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_VERSION = '2023-06-01';
@@ -99,6 +100,16 @@ export async function mineContextForUtterance(
   anthropicKey: string
 ): Promise<MineResult> {
   if (!anthropicKey) return { matched: false, card: null, reason: 'No Claude key configured.' };
+
+  // ── Fast-path: local purchase index ──────────────────────────────────────
+  // If the user is asking to reorder something we have a receipt for, build
+  // the card synchronously without spending tokens. The local index gets
+  // populated weekly by the background receipt indexer.
+  const localMatch = await tryLocalPurchaseLookup(transcript);
+  if (localMatch) {
+    return { matched: true, card: localMatch, reason: 'Matched local purchase index' };
+  }
+
   if (recentEmails.length === 0) {
     return { matched: false, card: null, reason: 'No emails available to mine.' };
   }
@@ -202,6 +213,56 @@ function normalizeMinedCard(raw: any): ActionCard | null {
     relatedEmailIds: Array.isArray(raw.relatedEmailIds)
       ? raw.relatedEmailIds.map(String)
       : undefined,
+    sourceId: null,
+    createdAt: new Date().toISOString(),
+    status: 'pending',
+  };
+}
+
+// ─── Local purchase lookup (fast path for reorders) ────────────────────────
+
+const REORDER_INTENT = /\b(again|reorder|re-order|repurchase|buy (it|that|another)|need (another|more))\b/i;
+
+async function tryLocalPurchaseLookup(transcript: string): Promise<ActionCard | null> {
+  if (!REORDER_INTENT.test(transcript)) return null;
+  let candidates: PurchaseRecord[];
+  try {
+    candidates = await findInPurchaseIndex(transcript, 3);
+  } catch {
+    return null;
+  }
+  if (candidates.length === 0) return null;
+  const top = candidates[0];
+
+  const payload: ActionPayload = top.asin
+    ? {
+        kind: 'reorder_amazon',
+        asin: top.asin,
+        query: top.productName,
+        label: 'Reorder on Amazon',
+      }
+    : {
+        kind: 'reorder_amazon',
+        query: top.productName,
+        label: 'Find on Amazon',
+      };
+
+  const orderDate = new Date(top.orderedAt);
+  const dateLabel = isNaN(orderDate.getTime())
+    ? 'recently'
+    : orderDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  const priceLabel = top.price ? `${top.price} from ${top.vendor}` : `from ${top.vendor}`;
+
+  return {
+    id: `ctx-${nanoid()}`,
+    source: 'voice',
+    title: `Reorder ${top.productName.slice(0, 50)}`,
+    context: `Bought ${priceLabel} on ${dateLabel}.`,
+    urgency: 'today',
+    primaryAction: payload,
+    secondaryActions: undefined,
+    firstStep: null,
+    relatedEmailIds: [top.emailId],
     sourceId: null,
     createdAt: new Date().toISOString(),
     status: 'pending',

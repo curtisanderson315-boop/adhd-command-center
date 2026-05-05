@@ -153,6 +153,46 @@ export async function markAsRead(messageId: string): Promise<void> {
   });
 }
 
+// ─── Generic search (used by receipt indexer + contextMiner) ───────────────
+
+/**
+ * Run an arbitrary Gmail search and return matching emails with body. Used
+ * by the receipt indexer (order-confirmation queries) and by the
+ * contextMiner's deeper-search fallback. Does not affect read/unread state.
+ *
+ * Pass standard Gmail operators in `query` (e.g. `from:amazon.com newer_than:90d`).
+ */
+export async function searchInboxEmails(query: string, maxResults = 20): Promise<RawEmail[]> {
+  const params = new URLSearchParams({
+    q: query,
+    maxResults: String(maxResults),
+  });
+  const listData = await gmailFetch(`/messages?${params.toString()}`);
+  if (!listData.messages?.length) return [];
+
+  const messages = await Promise.all(
+    listData.messages.map((m: { id: string }) =>
+      gmailFetch(`/messages/${m.id}?format=full`)
+    )
+  );
+
+  return messages.map((msg: any): RawEmail => {
+    const headers: Record<string, string> = {};
+    (msg.payload?.headers ?? []).forEach((h: { name: string; value: string }) => {
+      headers[h.name.toLowerCase()] = h.value;
+    });
+    return {
+      id: msg.id,
+      threadId: msg.threadId,
+      from: headers['from'] ?? 'Unknown',
+      subject: headers['subject'] ?? '(no subject)',
+      body: extractBody(msg.payload),
+      snippet: msg.snippet ?? '',
+      receivedAt: new Date(Number(msg.internalDate)).toISOString(),
+    };
+  });
+}
+
 // ─── Recent inbox cache (used by contextMiner) ───────────────────────────────
 //
 // The Memory-Augmented Action flow needs sub-3-second access to the user's

@@ -16,6 +16,7 @@ import { FloatingMic } from './src/components/FloatingMic';
 import { useAppStore } from './src/store';
 import { colors } from './src/theme';
 import { registerShortcuts, onSiriShortcut } from './src/services/siri';
+import { requestVoiceCapture } from './src/services/voiceTrigger';
 import {
   registerBackgroundPolling,
   NOTIFICATION_TAP_ROUTE,
@@ -76,8 +77,12 @@ export default function App() {
       switch (action) {
         case 'log_thought':
         case 'add_task':
+          navRef.current.navigate('Now');
+          break;
         case 'drive_brain_dump':
           navRef.current.navigate('Now');
+          // Give the screen a moment to mount before kicking off recording.
+          setTimeout(() => requestVoiceCapture(), 250);
           break;
         case 'triage':
           navRef.current.navigate('Inbox');

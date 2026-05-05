@@ -49,7 +49,23 @@ import { createEvent } from '../services/calendar';
 import { getSavedEmail, isSignedIn } from '../services/auth';
 import { nanoid } from '../services/utils';
 import { isContextHinted, mineContextForUtterance } from '../services/contextMiner';
+import { onVoiceCaptureRequest } from '../services/voiceTrigger';
 import type { ActionCard, CapturedAction, Task, Note } from '../types';
+
+// Drive Mode auto-stops the recording after this many ms if the user
+// doesn't tap the mic to stop early. Long enough for a real brain dump,
+// short enough that a forgotten session doesn't drain the mic forever.
+const DRIVE_MODE_AUTO_STOP_MS = 30 * 1000;
+
+const ORDINAL_WORDS = ['First', 'Second', 'Third', 'Fourth', 'Fifth', 'Sixth', 'Seventh', 'Eighth'];
+
+function buildDriveModeConfirmation(titles: string[]): string {
+  const real = titles.filter(Boolean).slice(0, 8);
+  if (real.length === 0) return 'Got nothing usable. Try again.';
+  if (real.length === 1) return `Got it. ${real[0]}.`;
+  const enumerated = real.map((t, i) => `${ORDINAL_WORDS[i] ?? `Item ${i + 1}`}: ${t}.`).join(' ');
+  return `Got ${real.length} things. ${enumerated}`;
+}
 
 export function FloatingMic() {
   const [isRecording, setIsRecording] = useState(false);
@@ -57,6 +73,8 @@ export function FloatingMic() {
   const [textInput, setTextInput] = useState('');
   const [showTextInput, setShowTextInput] = useState(false);
   const [textHint, setTextHint] = useState<string | null>(null);
+  const driveModeRef = React.useRef(false);
+  const driveAutoStopTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const recorder = useSafeAudioRecorder();
   const pulse = useSharedValue(0);
@@ -214,6 +232,7 @@ export function FloatingMic() {
       return;
     }
 
+    const wasDriveMode = driveModeRef.current;
     setIsProcessing(true);
     try {
       // Memory-augmented path first — if matched, skip the generic flow.
@@ -228,10 +247,12 @@ export function FloatingMic() {
           await routeAction(action);
         }
 
-        const confirmation = actions
-          .map((a) => a.confirmationText)
-          .filter(Boolean)
-          .join('. ');
+        const confirmation = wasDriveMode
+          ? buildDriveModeConfirmation(actions.map((a) => a.title))
+          : actions
+              .map((a) => a.confirmationText)
+              .filter(Boolean)
+              .join('. ');
         if (confirmation) {
           Speech.speak(confirmation, { language: 'en-US', rate: 1.0 });
         }
@@ -239,6 +260,7 @@ export function FloatingMic() {
     } catch (e: any) {
       Alert.alert('Could not understand that', e?.message ?? 'Try again or rephrase.');
     } finally {
+      driveModeRef.current = false;
       Keyboard.dismiss();
       setIsProcessing(false);
       setTextInput('');
@@ -290,6 +312,11 @@ export function FloatingMic() {
   };
 
   const onMicPressIn = () => {
+    // Drive Mode case: tap-to-stop instead of press-and-hold.
+    if (driveModeRef.current && isRecording) {
+      void handleRecordingComplete();
+      return;
+    }
     if (!isAudioAvailable) {
       // Native audio module not in this build — fall through to text input
       setTextHint('Voice recording needs a new app build. Type or use the keyboard mic 🎙');
@@ -300,7 +327,19 @@ export function FloatingMic() {
   };
 
   const onMicPressOut = async () => {
+    if (driveModeRef.current) return; // tap-to-stop, not release-to-stop
     if (!isRecording) return;
+    void handleRecordingComplete();
+  };
+
+  // Pulled the post-stop processing into its own helper so Drive Mode (tap-
+  // to-stop) and Manual Mode (release-to-stop) share identical handling.
+  const handleRecordingComplete = async () => {
+
+    if (driveAutoStopTimerRef.current) {
+      clearTimeout(driveAutoStopTimerRef.current);
+      driveAutoStopTimerRef.current = null;
+    }
 
     const uri = await stopRecording();
     if (!uri) {
@@ -329,6 +368,25 @@ export function FloatingMic() {
       setIsProcessing(false);
     }
   };
+
+  // ── Drive Mode trigger (Siri shortcut → auto-record) ───────────────────
+
+  useEffect(() => {
+    return onVoiceCaptureRequest(() => {
+      if (isRecording || isProcessing) return;
+      if (!isAudioAvailable) return;
+      driveModeRef.current = true;
+      // Speak before starting the recording so we don't capture the prompt.
+      Speech.speak("Drive mode. Speak now. I'll catch every thought.", {
+        language: 'en-US',
+        rate: 1.05,
+      });
+      void startRecording();
+      driveAutoStopTimerRef.current = setTimeout(() => {
+        if (isRecording) void handleRecordingComplete();
+      }, DRIVE_MODE_AUTO_STOP_MS);
+    });
+  }, [isRecording, isProcessing]);
 
   // ── Render: floating FAB + modal text input ────────────────────────────
 

@@ -27,6 +27,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import { useAppStore } from '../store';
 import { ActionCard } from '../components/ActionCard';
 import { FocusMode } from '../components/FocusMode';
+import { BundleStack } from '../components/BundleStack';
 import { colors, spacing, typography, radius } from '../theme';
 import {
   compareCards,
@@ -44,6 +45,22 @@ import type { ActionCard as ActionCardModel, ActionPayload } from '../types';
 
 const STALE_AFTER_MS = 5 * 60 * 1000;
 const SNOOZE_MS = 60 * 60 * 1000; // 1 hour
+const BUNDLE_THRESHOLD = 3;       // 3+ same-kind cards = a Bundle hero card
+
+// Action kinds that benefit from being knocked out as a batch
+const BUNDLE_ELIGIBLE_KINDS = new Set([
+  'reorder_amazon',
+  'create_draft',
+  'create_calendar',
+  'add_task',
+]);
+
+const BUNDLE_KIND_LABELS: Record<string, { plural: string; verb: string }> = {
+  reorder_amazon: { plural: 'things to buy', verb: 'shop' },
+  create_draft:   { plural: 'replies to send',  verb: 'reply' },
+  create_calendar:{ plural: 'events to add',    verb: 'add' },
+  add_task:       { plural: 'tasks to capture', verb: 'capture' },
+};
 
 export function HomeScreen() {
   const captures = useAppStore((s) => s.captures);
@@ -70,6 +87,7 @@ export function HomeScreen() {
   const [scanning, setScanning] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [focusCard, setFocusCard] = useState<ActionCardModel | null>(null);
+  const [bundleCards, setBundleCards] = useState<ActionCardModel[] | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasAutoScanned = useRef(false);
 
@@ -97,8 +115,43 @@ export function HomeScreen() {
       .sort(compareCards);
   }, [captures, tasks, triageQueue, suggestions, storedCards]);
 
-  const heroCard = visibleCards[0];
-  const restCards = visibleCards.slice(1);
+  // ── Bundle detection ────────────────────────────────────────────────────
+  // 3+ pending cards sharing the same primaryAction.kind get a synthetic
+  // Bundle hero card prepended. Tap → opens the BundleStack modal.
+  const { feedCards, bundleHeroes } = useMemo(() => {
+    const groups = new Map<string, ActionCardModel[]>();
+    for (const c of visibleCards) {
+      const k = c.primaryAction.kind;
+      if (!BUNDLE_ELIGIBLE_KINDS.has(k)) continue;
+      const list = groups.get(k) ?? [];
+      list.push(c);
+      groups.set(k, list);
+    }
+    const heroes: ActionCardModel[] = [];
+    for (const [kind, list] of groups) {
+      if (list.length >= BUNDLE_THRESHOLD) {
+        const labels = BUNDLE_KIND_LABELS[kind] ?? { plural: 'things to do', verb: 'do' };
+        heroes.push({
+          id: `bundle-${kind}`,
+          source: 'manual',
+          title: `You have ${list.length} ${labels.plural}. Want to knock them out?`,
+          context: `Tap to ${labels.verb} them one at a time.`,
+          urgency: 'today',
+          primaryAction: { kind: 'mark_done', label: 'Open Bundle' },
+          firstStep: null,
+          createdAt: new Date().toISOString(),
+          status: 'pending',
+        });
+      }
+    }
+    return { feedCards: visibleCards, bundleHeroes: heroes };
+  }, [visibleCards]);
+
+  // Bundle heroes go above the regular hero card.
+  const heroCard = bundleHeroes[0] ?? feedCards[0];
+  const restCards = bundleHeroes[0]
+    ? [...bundleHeroes.slice(1), ...feedCards]
+    : feedCards.slice(1);
 
   // ── Scan (pull to refresh) ──────────────────────────────────────────────
 
@@ -297,8 +350,16 @@ export function HomeScreen() {
   );
 
   const handlePrimary = useCallback(
-    (card: ActionCardModel) => performPayload(card, card.primaryAction),
-    [performPayload]
+    (card: ActionCardModel) => {
+      if (card.id.startsWith('bundle-')) {
+        const kind = card.id.slice('bundle-'.length);
+        const members = visibleCards.filter((c) => c.primaryAction.kind === kind);
+        if (members.length > 0) setBundleCards(members);
+        return;
+      }
+      void performPayload(card, card.primaryAction);
+    },
+    [performPayload, visibleCards]
   );
 
   const handleSecondary = useCallback(
@@ -382,6 +443,13 @@ export function HomeScreen() {
         card={focusCard}
         onDone={(c) => void markDoneAcrossSources(c)}
         onClose={() => setFocusCard(null)}
+      />
+
+      <BundleStack
+        visible={bundleCards !== null}
+        cards={bundleCards ?? []}
+        onDo={(c) => void performPayload(c, c.primaryAction)}
+        onClose={() => setBundleCards(null)}
       />
     </SafeAreaView>
   );

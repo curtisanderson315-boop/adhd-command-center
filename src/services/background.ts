@@ -19,6 +19,7 @@ import { fetchUpcomingEvents } from './calendar';
 import { dedupKey, scanForSuggestions } from './smartScan';
 import { runActivationCoach } from './activationCoach';
 import { syncSourcesToActionCards } from './actionCards';
+import { runReceiptIndexer } from './receiptIndex';
 
 export const ADHD_EMAIL_POLL = 'ADHD_EMAIL_POLL';
 export const NOTIFICATION_TAP_ROUTE = 'ADHD_NOTIFICATION_ROUTE';
@@ -126,6 +127,15 @@ async function runEmailPoll(): Promise<boolean> {
     if (filled > 0) console.log(`[BackgroundPoll] activation coach filled ${filled} firstSteps`);
   } catch (e) {
     console.warn('[BackgroundPoll] activation coach failed:', e);
+  }
+
+  // ── Step 5: Receipt index — weekly TTL inside the function so safe to
+  //          call every poll. Built so contextMiner has fast local lookup.
+  try {
+    const indexed = await runReceiptIndexer();
+    if (indexed > 0) console.log(`[BackgroundPoll] receipt index now has ${indexed} purchases`);
+  } catch (e) {
+    console.warn('[BackgroundPoll] receipt indexer failed:', e);
   }
 
   return true;
