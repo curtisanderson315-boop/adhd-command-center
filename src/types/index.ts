@@ -201,4 +201,6 @@ export interface ActionCard {
   status: ActionCardStatus;
   snoozeUntil?: string | null;
   completedAt?: string | null;
+  /** ISO 8601 — set by archiveCard. After 30 days, hydrate purges these. */
+  archivedAt?: string | null;
 }

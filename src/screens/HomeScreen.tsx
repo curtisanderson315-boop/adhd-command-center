@@ -27,7 +27,8 @@ import { useFocusEffect } from '@react-navigation/native';
 import { useAppStore } from '../store';
 import { ActionCard } from '../components/ActionCard';
 import { FocusMode } from '../components/FocusMode';
-import { BundleStack } from '../components/BundleStack';
+import { BundleListView } from '../components/BundleListView';
+import { requestUndoBanner } from '../services/undoBanner';
 import { colors, spacing, typography, radius } from '../theme';
 import {
   compareCards,
@@ -68,6 +69,7 @@ export function HomeScreen() {
   const triageQueue = useAppStore((s) => s.triageQueue);
   const suggestions = useAppStore((s) => s.suggestions);
   const storedCards = useAppStore((s) => s.actionCards);
+  const archivedCards = useAppStore((s) => s.archivedCards);
   const settings = useAppStore((s) => s.settings);
   const lastScanAt = useAppStore((s) => s.lastScanAt);
 
@@ -83,6 +85,8 @@ export function HomeScreen() {
   const snoozeCard = useAppStore((s) => s.snoozeCard);
   const markCardStatus = useAppStore((s) => s.markCardStatus);
   const upsertCard = useAppStore((s) => s.upsertCard);
+  const archiveCard = useAppStore((s) => s.archiveCard);
+  const restoreCard = useAppStore((s) => s.restoreCard);
 
   const [scanning, setScanning] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -102,8 +106,12 @@ export function HomeScreen() {
   const visibleCards = useMemo(() => {
     const projected = projectAllSources({ captures, tasks, triageQueue, suggestions });
     const merged = mergeStoredOverlays(projected, storedCards);
+    // Cards archived via Bundle list dismiss vanish from the feed until
+    // the user taps Undo on the banner (or the 30-day TTL purges them).
+    const archivedIds = new Set(archivedCards.map((c) => c.id));
     const now = Date.now();
     return merged
+      .filter((c) => !archivedIds.has(c.id))
       .filter((c) => {
         if (c.status === 'pending') return true;
         if (c.status === 'snoozed' && c.snoozeUntil) {
@@ -113,7 +121,7 @@ export function HomeScreen() {
         return false;
       })
       .sort(compareCards);
-  }, [captures, tasks, triageQueue, suggestions, storedCards]);
+  }, [captures, tasks, triageQueue, suggestions, storedCards, archivedCards]);
 
   // ── Bundle detection ────────────────────────────────────────────────────
   // 3+ pending cards sharing the same primaryAction.kind get a synthetic
@@ -452,10 +460,20 @@ export function HomeScreen() {
         onClose={() => setFocusCard(null)}
       />
 
-      <BundleStack
+      <BundleListView
         visible={bundleCards !== null}
-        cards={bundleCards ?? []}
-        onDo={(c) => void performPayload(c, c.primaryAction)}
+        cards={(bundleCards ?? []).filter(
+          (c) => !archivedCards.some((a) => a.id === c.id)
+        )}
+        onPrimary={(c) => void performPayload(c, c.primaryAction)}
+        onSecondary={(c, p) => void performPayload(c, p)}
+        onDismiss={(c) => {
+          void archiveCard(c);
+          requestUndoBanner({
+            message: c.title.slice(0, 80),
+            onUndo: () => void restoreCard(c.id),
+          });
+        }}
         onClose={() => setBundleCards(null)}
       />
     </SafeAreaView>

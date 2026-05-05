@@ -13,6 +13,7 @@ import { TriageScreen } from './src/screens/TriageScreen';
 import { TasksScreen } from './src/screens/TasksScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
 import { FloatingMic } from './src/components/FloatingMic';
+import { UndoBanner } from './src/components/UndoBanner';
 import { useAppStore } from './src/store';
 import { colors } from './src/theme';
 import { registerShortcuts, onSiriShortcut } from './src/services/siri';
@@ -193,6 +194,9 @@ export default function App() {
 
           {/* Persistent floating mic — accessible from any tab. */}
           <FloatingMic />
+
+          {/* Global Undo banner for archive/restore from anywhere. */}
+          <UndoBanner />
         </View>
       </SafeAreaProvider>
     </GestureHandlerRootView>

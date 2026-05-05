@@ -58,6 +58,11 @@ interface AppState {
   snoozeCard: (id: string, untilISO: string) => Promise<void>;
   setCardFirstStep: (id: string, firstStep: string) => Promise<void>;
 
+  // ── Archived Cards (Bundle list dismiss + Undo) ──────────────────────────
+  archivedCards: ActionCard[];
+  archiveCard: (card: ActionCard) => Promise<void>;
+  restoreCard: (id: string) => Promise<void>;
+
   // ── Bootstrap ─────────────────────────────────────────────────────────────
   hydrate: () => Promise<void>;
 }
@@ -83,7 +88,10 @@ const STORAGE_KEYS = {
   suggestions: '@adhd:suggestions',
   lastScanAt: '@adhd:lastScanAt',
   actionCards: '@adhd:actionCards',
+  archivedCards: '@adhd:archivedCards',
 };
+
+const ARCHIVE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
 export const useAppStore = create<AppState>((set, get) => ({
   captures: [],
@@ -95,6 +103,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   suggestions: [],
   lastScanAt: null,
   actionCards: [],
+  archivedCards: [],
 
   // ── Captures ───────────────────────────────────────────────────────────────
   addCapture: async (action) => {
@@ -277,6 +286,47 @@ export const useAppStore = create<AppState>((set, get) => ({
     await AsyncStorage.setItem(STORAGE_KEYS.actionCards, JSON.stringify(next));
   },
 
+  // ── Archived Cards ────────────────────────────────────────────────────────
+  // archiveCard stashes a copy with archivedAt set + removes the card from
+  // actionCards if it lived there (ctx-/manual cards). For source-projected
+  // cards the source is left untouched; the archive list is consulted at
+  // render time by NowFeed so the card vanishes from the feed without
+  // mutating the source.
+  archiveCard: async (card) => {
+    const stamped: ActionCard = {
+      ...card,
+      status: 'dismissed',
+      archivedAt: new Date().toISOString(),
+    };
+    const archive = [stamped, ...get().archivedCards.filter((c) => c.id !== card.id)];
+    const cards = get().actionCards.filter((c) => c.id !== card.id);
+    set({ archivedCards: archive, actionCards: cards });
+    await Promise.all([
+      AsyncStorage.setItem(STORAGE_KEYS.archivedCards, JSON.stringify(archive)),
+      AsyncStorage.setItem(STORAGE_KEYS.actionCards, JSON.stringify(cards)),
+    ]);
+  },
+
+  // restoreCard pulls back from the archive. Source-projected cards reappear
+  // automatically on next render. Manual cards (ctx-/bundle-) are re-upserted
+  // into actionCards so they show up again.
+  restoreCard: async (id) => {
+    const found = get().archivedCards.find((c) => c.id === id);
+    const archive = get().archivedCards.filter((c) => c.id !== id);
+    set({ archivedCards: archive });
+    await AsyncStorage.setItem(STORAGE_KEYS.archivedCards, JSON.stringify(archive));
+    if (found && (id.startsWith('ctx-') || id.startsWith('manual-') || id.startsWith('bundle-'))) {
+      const restored: ActionCard = {
+        ...found,
+        status: 'pending',
+        archivedAt: null,
+      };
+      const cards = [restored, ...get().actionCards.filter((c) => c.id !== id)];
+      set({ actionCards: cards });
+      await AsyncStorage.setItem(STORAGE_KEYS.actionCards, JSON.stringify(cards));
+    }
+  },
+
   // ── Hydrate from storage ───────────────────────────────────────────────────
   hydrate: async () => {
     try {
@@ -290,6 +340,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         suggestions,
         lastScanAt,
         actionCards,
+        archivedCards,
       ] = await Promise.all([
         AsyncStorage.getItem(STORAGE_KEYS.captures),
         AsyncStorage.getItem(STORAGE_KEYS.tasks),
@@ -300,7 +351,23 @@ export const useAppStore = create<AppState>((set, get) => ({
         AsyncStorage.getItem(STORAGE_KEYS.suggestions),
         AsyncStorage.getItem(STORAGE_KEYS.lastScanAt),
         AsyncStorage.getItem(STORAGE_KEYS.actionCards),
+        AsyncStorage.getItem(STORAGE_KEYS.archivedCards),
       ]);
+
+      // Purge archive entries older than 30 days on every hydrate. Cheap
+      // and keeps the local index small. See ARCHIVE_TTL_MS.
+      const rawArchived: ActionCard[] = archivedCards ? JSON.parse(archivedCards) : [];
+      const now = Date.now();
+      const purgedArchived = rawArchived.filter((c) => {
+        if (!c.archivedAt) return true;
+        return now - new Date(c.archivedAt).getTime() < ARCHIVE_TTL_MS;
+      });
+      if (purgedArchived.length !== rawArchived.length) {
+        await AsyncStorage.setItem(
+          STORAGE_KEYS.archivedCards,
+          JSON.stringify(purgedArchived)
+        );
+      }
 
       set({
         captures: captures ? JSON.parse(captures) : [],
@@ -314,6 +381,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         suggestions: suggestions ? JSON.parse(suggestions) : [],
         lastScanAt: lastScanAt ?? null,
         actionCards: actionCards ? JSON.parse(actionCards) : [],
+        archivedCards: purgedArchived,
       });
     } catch (e) {
       console.error('Failed to hydrate store:', e);
