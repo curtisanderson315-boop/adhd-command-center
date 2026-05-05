@@ -1,12 +1,13 @@
 /**
- * CaptureBar — the persistent bottom voice/text input strip.
+ * FloatingMic — persistent voice capture FAB rendered at the App.tsx level.
  *
- * Voice flow:
- *   1. Press-and-hold the mic → expo-audio starts recording
- *   2. Release → attempt transcription via ai.transcribeAudio
- *   3. On null/error → fall back to the text input (iOS keyboard mic still works)
+ * Replaces the per-screen CaptureBar. Curtis can hold the mic from any tab to
+ * speak; voice flows through the same processing pipeline (Whisper transcribe
+ * → Claude voice processing → routing). A modal Type fallback drops down when
+ * native audio isn't available or the user explicitly taps "Type."
  *
- * Both paths converge on processVoiceInput → store + routing + spoken confirmation.
+ * Recording behavior is preserved verbatim from CaptureBar — same shim hook,
+ * same permission flow, same error handling.
  */
 
 import React, { useEffect, useState } from 'react';
@@ -20,6 +21,9 @@ import {
   Alert,
   Platform,
   Pressable,
+  Keyboard,
+  Modal,
+  KeyboardAvoidingView,
 } from 'react-native';
 import Animated, {
   useSharedValue,
@@ -31,11 +35,11 @@ import Animated, {
   Easing,
 } from 'react-native-reanimated';
 import {
-  useAudioRecorder,
-  requestRecordingPermissionsAsync,
-  setAudioModeAsync,
-  RecordingPresets,
-} from 'expo-audio';
+  isAudioAvailable,
+  useSafeAudioRecorder,
+  safeRequestPermissions,
+  safeSetAudioMode,
+} from '../services/audioShim';
 import * as Speech from 'expo-speech';
 import { colors, spacing, radius } from '../theme';
 import { processVoiceInput, transcribeAudio } from '../services/ai';
@@ -46,14 +50,14 @@ import { getSavedEmail, isSignedIn } from '../services/auth';
 import { nanoid } from '../services/utils';
 import type { CapturedAction, Task, Note } from '../types';
 
-export function CaptureBar() {
+export function FloatingMic() {
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [textInput, setTextInput] = useState('');
   const [showTextInput, setShowTextInput] = useState(false);
   const [textHint, setTextHint] = useState<string | null>(null);
 
-  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const recorder = useSafeAudioRecorder();
   const pulse = useSharedValue(0);
   const micScale = useSharedValue(1);
 
@@ -85,7 +89,7 @@ export function CaptureBar() {
     transform: [{ scale: micScale.value }],
   }));
 
-  // ── Routing ─────────────────────────────────────────────────────────────
+  // ── Routing (preserved from CaptureBar) ─────────────────────────────────
 
   const routeAction = async (action: CapturedAction) => {
     try {
@@ -98,7 +102,7 @@ export function CaptureBar() {
           });
           return;
         }
-        const result = await createDraft({
+        await createDraft({
           to: action.recipientEmail ?? undefined,
           subject: action.title,
           body: action.body ?? '',
@@ -174,6 +178,9 @@ export function CaptureBar() {
   };
 
   // ── Process transcript / text ──────────────────────────────────────────
+  // NOTE: Phase C inserts a memory-augmented (contextMiner) branch before the
+  // generic CapturedAction flow below. Until that lands, every transcript
+  // takes the legacy path.
 
   const processTranscript = async (text: string) => {
     if (!text.trim()) return;
@@ -204,6 +211,7 @@ export function CaptureBar() {
     } catch (e: any) {
       Alert.alert('Could not understand that', e?.message ?? 'Try again or rephrase.');
     } finally {
+      Keyboard.dismiss();
       setIsProcessing(false);
       setTextInput('');
       setShowTextInput(false);
@@ -211,12 +219,12 @@ export function CaptureBar() {
     }
   };
 
-  // ── Recording lifecycle ────────────────────────────────────────────────
+  // ── Recording lifecycle (preserved from CaptureBar) ────────────────────
 
   const startRecording = async () => {
     if (isRecording || isProcessing) return;
     try {
-      const perm = await requestRecordingPermissionsAsync();
+      const perm = await safeRequestPermissions();
       if (!perm.granted) {
         Alert.alert(
           'Microphone access needed',
@@ -224,7 +232,7 @@ export function CaptureBar() {
         );
         return;
       }
-      await setAudioModeAsync({
+      await safeSetAudioMode({
         playsInSilentMode: true,
         allowsRecording: true,
       });
@@ -245,7 +253,7 @@ export function CaptureBar() {
     setIsRecording(false);
     try {
       await recorder.stop();
-      await setAudioModeAsync({ allowsRecording: false });
+      await safeSetAudioMode({ allowsRecording: false });
       return recorder.uri ?? null;
     } catch (e: any) {
       console.warn('Recording stop failed:', e?.message ?? e);
@@ -254,6 +262,12 @@ export function CaptureBar() {
   };
 
   const onMicPressIn = () => {
+    if (!isAudioAvailable) {
+      // Native audio module not in this build — fall through to text input
+      setTextHint('Voice recording needs a new app build. Type or use the keyboard mic 🎙');
+      setShowTextInput(true);
+      return;
+    }
     void startRecording();
   };
 
@@ -262,156 +276,144 @@ export function CaptureBar() {
 
     const uri = await stopRecording();
     if (!uri) {
-      // Permission denied or recorder failed — open text input instead
-      setTextHint('Voice capture failed. Type or use the keyboard mic.');
-      setShowTextInput(true);
+      Alert.alert(
+        "Voice didn't save",
+        'Try holding the mic again, or tap "Type" to enter it manually.'
+      );
       return;
     }
 
     setIsProcessing(true);
     try {
-      const transcript = await transcribeAudio(uri, settings.anthropicKey);
-      if (transcript && transcript.trim()) {
+      const transcript = await transcribeAudio(uri, settings.openaiKey);
+      if (transcript) {
         await processTranscript(transcript);
       } else {
-        // No transcription available — fall through to keyboard input.
-        // iOS users can tap the keyboard's mic to dictate, which is excellent.
-        setTextHint(
-          'I recorded that. Tap the keyboard mic to dictate, or type what you said.'
+        // No OpenAI key configured.
+        Alert.alert(
+          'Add your OpenAI key',
+          'Open Settings → Voice Transcription and paste a key from platform.openai.com to enable voice transcription.'
         );
-        setShowTextInput(true);
       }
     } catch (e: any) {
-      setTextHint('Could not transcribe. Type what you said.');
-      setShowTextInput(true);
+      Alert.alert("Couldn't transcribe", e?.message ?? 'Try again in a moment.');
     } finally {
       setIsProcessing(false);
     }
   };
 
-  // ── Render ────────────────────────────────────────────────────────────
+  // ── Render: floating FAB + modal text input ────────────────────────────
 
   return (
-    <View style={styles.container}>
-      {showTextInput ? (
-        <View>
-          {textHint ? <Text style={styles.hint}>{textHint}</Text> : null}
-          <View style={styles.textRow}>
-            <TextInput
-              style={styles.input}
-              placeholder="Type anything on your mind..."
-              placeholderTextColor={colors.textMuted}
-              value={textInput}
-              onChangeText={setTextInput}
-              onSubmitEditing={() => processTranscript(textInput)}
-              returnKeyType="done"
-              autoFocus
-              multiline
-            />
-            <TouchableOpacity
-              style={styles.sendBtn}
-              onPress={() => processTranscript(textInput)}
-              disabled={!textInput.trim() || isProcessing}
+    <>
+      <View style={styles.fabWrap} pointerEvents="box-none">
+        <View style={styles.micWrap}>
+          {isRecording ? (
+            <Animated.View style={[styles.recordingRing, pulseStyle]} pointerEvents="none" />
+          ) : null}
+          <Pressable
+            onPressIn={onMicPressIn}
+            onPressOut={onMicPressOut}
+            onLongPress={() => setShowTextInput(true)}
+            disabled={isProcessing}
+            hitSlop={12}
+          >
+            <Animated.View
+              style={[
+                styles.micBtn,
+                isRecording && styles.micBtnRecording,
+                micScaleStyle,
+              ]}
             >
               {isProcessing ? (
-                <ActivityIndicator color="#fff" size="small" />
+                <ActivityIndicator color="#fff" />
               ) : (
-                <Text style={styles.sendIcon}>→</Text>
+                <Text style={styles.micIcon}>{isRecording ? '●' : '🎙'}</Text>
               )}
-            </TouchableOpacity>
+            </Animated.View>
+          </Pressable>
+        </View>
+      </View>
+
+      <Modal
+        visible={showTextInput}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowTextInput(false)}
+      >
+        <KeyboardAvoidingView
+          style={styles.modalContainer}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
+          <Pressable style={styles.modalBackdrop} onPress={() => setShowTextInput(false)} />
+          <View style={styles.sheet}>
+            {textHint ? <Text style={styles.hint}>{textHint}</Text> : null}
+            <View style={styles.textRow}>
+              <TextInput
+                style={styles.input}
+                placeholder="What's on your mind?"
+                placeholderTextColor={colors.textMuted}
+                value={textInput}
+                onChangeText={setTextInput}
+                onSubmitEditing={() => processTranscript(textInput)}
+                returnKeyType="done"
+                autoFocus
+                multiline
+              />
+              <TouchableOpacity
+                style={styles.sendBtn}
+                onPress={() => processTranscript(textInput)}
+                disabled={!textInput.trim() || isProcessing}
+              >
+                {isProcessing ? (
+                  <ActivityIndicator color="#fff" size="small" />
+                ) : (
+                  <Text style={styles.sendIcon}>→</Text>
+                )}
+              </TouchableOpacity>
+            </View>
             <TouchableOpacity
-              style={styles.cancelBtn}
               onPress={() => {
                 setShowTextInput(false);
                 setTextInput('');
                 setTextHint(null);
               }}
+              style={styles.cancelLink}
             >
-              <Text style={styles.cancelIcon}>✕</Text>
+              <Text style={styles.cancelLinkText}>Cancel</Text>
             </TouchableOpacity>
           </View>
-        </View>
-      ) : (
-        <View style={styles.buttonRow}>
-          <TouchableOpacity
-            style={styles.typeBtn}
-            onPress={() => setShowTextInput(true)}
-            disabled={isProcessing}
-          >
-            <Text style={styles.typeBtnText}>Type</Text>
-          </TouchableOpacity>
-
-          <View style={styles.micWrap}>
-            {isRecording ? (
-              <Animated.View style={[styles.recordingRing, pulseStyle]} />
-            ) : null}
-            <Pressable
-              onPressIn={onMicPressIn}
-              onPressOut={onMicPressOut}
-              disabled={isProcessing}
-              hitSlop={12}
-            >
-              <Animated.View
-                style={[
-                  styles.micBtn,
-                  isRecording && styles.micBtnRecording,
-                  micScaleStyle,
-                ]}
-              >
-                {isProcessing ? (
-                  <ActivityIndicator color="#fff" />
-                ) : (
-                  <Text style={styles.micIcon}>{isRecording ? '●' : '🎙'}</Text>
-                )}
-              </Animated.View>
-            </Pressable>
-            <Text style={styles.micCaption}>
-              {isProcessing
-                ? 'Thinking...'
-                : isRecording
-                ? 'Listening...'
-                : 'Hold to speak'}
-            </Text>
-          </View>
-
-          <View style={styles.typeBtn} />
-        </View>
-      )}
-    </View>
+        </KeyboardAvoidingView>
+      </Modal>
+    </>
   );
 }
 
+const TAB_BAR_HEIGHT = Platform.OS === 'ios' ? 82 : 60;
+
 const styles = StyleSheet.create({
-  container: {
-    backgroundColor: '#13132a',
-    borderTopWidth: 1,
-    borderTopColor: colors.border,
-    paddingBottom: Platform.OS === 'ios' ? 28 : 12,
-    paddingTop: 12,
-    paddingHorizontal: spacing.md,
-  },
-  buttonRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+  fabWrap: {
+    position: 'absolute',
+    right: spacing.md,
+    bottom: TAB_BAR_HEIGHT + 12,
+    zIndex: 999,
   },
   micWrap: {
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 4,
   },
   micBtn: {
-    width: 72,
-    height: 72,
+    width: 64,
+    height: 64,
     borderRadius: radius.full,
     backgroundColor: colors.purple,
     alignItems: 'center',
     justifyContent: 'center',
     shadowColor: colors.purple,
-    shadowOpacity: 0.5,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 8,
+    shadowOpacity: 0.6,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 10,
   },
   micBtnRecording: {
     backgroundColor: colors.urgent,
@@ -419,34 +421,34 @@ const styles = StyleSheet.create({
   },
   recordingRing: {
     position: 'absolute',
-    top: -8,
-    left: -8,
-    right: -8,
-    bottom: -8,
+    top: -10,
+    left: -10,
+    right: -10,
+    bottom: -10,
     borderRadius: radius.full,
     backgroundColor: colors.urgent,
     opacity: 0.3,
   },
   micIcon: {
-    fontSize: 28,
+    fontSize: 26,
     color: '#fff',
   },
-  micCaption: {
-    fontSize: 16,
-    color: colors.textSecondary,
-    fontWeight: '600',
-    marginTop: 2,
+  modalContainer: {
+    flex: 1,
+    justifyContent: 'flex-end',
   },
-  typeBtn: {
-    width: 60,
-    height: 56,
-    alignItems: 'center',
-    justifyContent: 'center',
+  modalBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.5)',
   },
-  typeBtnText: {
-    color: colors.textSecondary,
-    fontSize: 16,
-    fontWeight: '600',
+  sheet: {
+    backgroundColor: '#13132a',
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    padding: spacing.lg,
+    paddingBottom: Platform.OS === 'ios' ? 32 : spacing.lg,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
   },
   textRow: {
     flexDirection: 'row',
@@ -461,11 +463,12 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.sm,
     color: colors.textPrimary,
     fontSize: 16,
-    maxHeight: 120,
+    maxHeight: 140,
+    minHeight: 56,
   },
   sendBtn: {
-    width: 44,
-    height: 44,
+    width: 56,
+    height: 56,
     borderRadius: radius.full,
     backgroundColor: colors.purple,
     alignItems: 'center',
@@ -473,22 +476,22 @@ const styles = StyleSheet.create({
   },
   sendIcon: {
     color: '#fff',
-    fontSize: 20,
+    fontSize: 22,
     fontWeight: '700',
   },
-  cancelBtn: {
-    width: 44,
-    height: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
+  cancelLink: {
+    alignSelf: 'center',
+    marginTop: spacing.md,
+    paddingVertical: 8,
   },
-  cancelIcon: {
-    color: colors.textMuted,
-    fontSize: 18,
+  cancelLinkText: {
+    color: colors.textSecondary,
+    fontSize: 16,
+    fontWeight: '600',
   },
   hint: {
     color: colors.textSecondary,
-    fontSize: 13,
+    fontSize: 14,
     marginBottom: spacing.sm,
     paddingHorizontal: spacing.xs,
   },

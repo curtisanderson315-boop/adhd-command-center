@@ -54,6 +54,9 @@ export function SettingsScreen() {
   const [apiKey, setApiKey] = useState(settings.anthropicKey);
   const [editingKey, setEditingKey] = useState(!settings.anthropicKey);
   const [testStatus, setTestStatus] = useState<TestResult>('idle');
+  const [openaiKey, setOpenaiKey] = useState(settings.openaiKey);
+  const [editingOpenaiKey, setEditingOpenaiKey] = useState(!settings.openaiKey);
+  const [openaiTestStatus, setOpenaiTestStatus] = useState<TestResult>('idle');
   const [signedIn, setSignedIn] = useState(false);
   const [userEmail, setUserEmail] = useState('');
 
@@ -117,6 +120,39 @@ export function SettingsScreen() {
     setApiKey(trimmed);
     setEditingKey(false);
     setTestStatus('idle');
+  };
+
+  const handleSaveOpenaiKey = async () => {
+    const trimmed = openaiKey.trim();
+    await updateSettings({ openaiKey: trimmed });
+    setOpenaiKey(trimmed);
+    setEditingOpenaiKey(false);
+    setOpenaiTestStatus('idle');
+  };
+
+  const handleTestOpenaiKey = async () => {
+    const key = openaiKey.trim();
+    if (!key) {
+      Alert.alert('Add a key first', 'Paste your OpenAI key, save, then test.');
+      return;
+    }
+    setOpenaiTestStatus('testing');
+    try {
+      const res = await fetch('https://api.openai.com/v1/models', {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${key}` },
+      });
+      if (res.ok) {
+        setOpenaiTestStatus('ok');
+        if (key !== settings.openaiKey) {
+          await updateSettings({ openaiKey: key });
+        }
+      } else {
+        setOpenaiTestStatus('fail');
+      }
+    } catch {
+      setOpenaiTestStatus('fail');
+    }
   };
 
   const handleTestApiKey = async () => {
@@ -280,6 +316,68 @@ export function SettingsScreen() {
                 {testStatus === 'ok'
                   ? '✅ Connected'
                   : testStatus === 'fail'
+                  ? '❌ Test failed — check the key'
+                  : 'Test connection'}
+              </Text>
+            )}
+          </TouchableOpacity>
+        </Section>
+
+        {/* ── OpenAI / Whisper ──────────────────────────────────────── */}
+        <Section title="VOICE TRANSCRIPTION (OPENAI WHISPER)">
+          <Text style={styles.hint}>
+            Get your API key at platform.openai.com → API Keys. Used only for transcribing voice recordings (~$0.006/min). Leave blank to fall back to the iOS keyboard mic.
+          </Text>
+
+          {!editingOpenaiKey && settings.openaiKey ? (
+            <View style={styles.savedKeyRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.savedKeyLabel}>Saved key</Text>
+                <Text style={styles.savedKeyValue}>{maskKey(settings.openaiKey)}</Text>
+              </View>
+              <TouchableOpacity
+                onPress={() => {
+                  setEditingOpenaiKey(true);
+                  setOpenaiKey(settings.openaiKey);
+                }}
+                style={styles.linkBtn}
+              >
+                <Text style={styles.linkBtnText}>Replace</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <>
+              <TextInput
+                style={styles.input}
+                placeholder="sk-..."
+                placeholderTextColor={colors.textMuted}
+                value={openaiKey}
+                onChangeText={(v) => {
+                  setOpenaiKey(v);
+                  setOpenaiTestStatus('idle');
+                }}
+                secureTextEntry
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+              <TouchableOpacity style={styles.saveBtn} onPress={handleSaveOpenaiKey}>
+                <Text style={styles.saveBtnText}>Save API Key</Text>
+              </TouchableOpacity>
+            </>
+          )}
+
+          <TouchableOpacity
+            style={styles.secondaryBtn}
+            onPress={handleTestOpenaiKey}
+            disabled={openaiTestStatus === 'testing'}
+          >
+            {openaiTestStatus === 'testing' ? (
+              <ActivityIndicator color={colors.textPrimary} />
+            ) : (
+              <Text style={styles.secondaryBtnText}>
+                {openaiTestStatus === 'ok'
+                  ? '✅ Connected'
+                  : openaiTestStatus === 'fail'
                   ? '❌ Test failed — check the key'
                   : 'Test connection'}
               </Text>

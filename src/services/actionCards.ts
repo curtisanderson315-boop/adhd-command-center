@@ -304,3 +304,87 @@ export function compareCards(a: ActionCard, b: ActionCard): number {
 }
 
 export { URGENCY_RANK };
+
+// ─── Now Feed projection ───────────────────────────────────────────────────
+
+/**
+ * Project all source-of-truth state onto ActionCards. Runs every render of
+ * the Now Feed; the operation is pure and cheap (just .map). Source remains
+ * authoritative for status — the stored `actionCards` overlay only adds
+ * enrichments (firstStep) and absorbs manually-created cards (contextMiner).
+ */
+export function projectAllSources(input: {
+  captures: CapturedAction[];
+  tasks: Task[];
+  triageQueue: TriagedEmail[];
+  suggestions: SmartSuggestion[];
+}): ActionCard[] {
+  const fromCaptures = input.captures.map(cardFromCapturedAction);
+  const fromTasks = input.tasks.map(cardFromTask);
+  // Skip noise — fyi/noise emails shouldn't bubble into the Now Feed; they
+  // stay in the Inbox tab where the user can review at their pace.
+  const fromTriage = input.triageQueue
+    .filter((e) => e.priority === 'urgent' || e.priority === 'action_needed')
+    .map(cardFromTriagedEmail);
+  const fromSmart = input.suggestions
+    .filter((s) => s.status === 'pending')
+    .map(cardFromSmartSuggestion);
+
+  return [...fromCaptures, ...fromTasks, ...fromTriage, ...fromSmart];
+}
+
+/**
+ * Merge persisted overlays into the projected card list. Stored cards either
+ * (a) enrich a projected card with firstStep + relatedEmailIds, or
+ * (b) appear as manual cards (id not present in projection — typically from
+ *     contextMiner or the activation coach).
+ *
+ * Critically: status comes from the SOURCE for projected cards. To dismiss a
+ * projected card, call the source-specific dismiss action (the card vanishes
+ * on the next render). Stored-only manual cards keep their stored status.
+ */
+export function mergeStoredOverlays(
+  projected: ActionCard[],
+  stored: ActionCard[]
+): ActionCard[] {
+  const projectedIds = new Set(projected.map((c) => c.id));
+  const storedById = new Map(stored.map((c) => [c.id, c]));
+
+  const enriched = projected.map((p) => {
+    const s = storedById.get(p.id);
+    if (!s) return p;
+    return {
+      ...p,
+      firstStep: p.firstStep ?? s.firstStep ?? null,
+      relatedEmailIds: p.relatedEmailIds ?? s.relatedEmailIds,
+      // Honor stored snooze on a still-pending source card so swipe-to-snooze
+      // hides it for the requested window without losing the underlying source.
+      ...(s.status === 'snoozed' && p.status === 'pending'
+        ? { status: 'snoozed' as const, snoozeUntil: s.snoozeUntil }
+        : {}),
+      ...(s.status === 'dismissed' && p.status === 'pending'
+        ? { status: 'dismissed' as const }
+        : {}),
+    };
+  });
+
+  const manualOnly = stored.filter((c) => !projectedIds.has(c.id));
+  return [...enriched, ...manualOnly];
+}
+
+/**
+ * Identify what kind of source a card id points to, so swipe-to-dismiss can
+ * call the right source-specific action. Card ids are minted by the
+ * converters with stable prefixes: voice-, task-, email-, smart-, plus
+ * "manual-" / "ctx-" / "bundle-" for non-projected cards.
+ */
+export function parseCardId(id: string): {
+  kind: 'voice' | 'task' | 'email' | 'smart' | 'manual';
+  sourceId: string;
+} {
+  if (id.startsWith('voice-')) return { kind: 'voice', sourceId: id.slice('voice-'.length) };
+  if (id.startsWith('task-')) return { kind: 'task', sourceId: id.slice('task-'.length) };
+  if (id.startsWith('email-')) return { kind: 'email', sourceId: id.slice('email-'.length) };
+  if (id.startsWith('smart-')) return { kind: 'smart', sourceId: id.slice('smart-'.length) };
+  return { kind: 'manual', sourceId: id };
+}

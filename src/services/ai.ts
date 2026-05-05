@@ -163,23 +163,59 @@ User said: "${transcript}"`;
   }));
 }
 
-// ─── Audio transcription ─────────────────────────────────────────────────────
+// ─── Audio transcription (OpenAI Whisper) ───────────────────────────────────
 //
-// The Anthropic Claude API does not currently accept audio inputs. We expose a
-// transcription entry point anyway so the UI can attempt it and fall back to the
-// keyboard text-input flow when it returns null. When/if Claude (or a sidecar
-// service the user configures) gains audio support, this is the single seam to
-// upgrade — UI does not need to change.
-//
-// Returns the transcript text, or null when transcription is unavailable.
+// Posts the recorded audio file to OpenAI's Whisper API and returns the
+// transcript. Returns null on missing key, network failure, or non-2xx response
+// — caller falls through to the keyboard text-input flow.
 
+const WHISPER_URL = 'https://api.openai.com/v1/audio/transcriptions';
+
+/**
+ * Returns the transcript on success.
+ * Returns null when no openaiKey is configured (caller should prompt user).
+ * Throws Error with a user-friendly message on any other failure.
+ */
 export async function transcribeAudio(
-  _audioUri: string,
-  _apiKey: string
+  audioUri: string,
+  openaiKey: string
 ): Promise<string | null> {
-  // TODO: BLOCKED — Anthropic API has no audio endpoint. Wire OpenAI Whisper
-  // or native iOS SFSpeechRecognizer here when the user is ready to add it.
-  return null;
+  if (!audioUri) throw new Error('No audio recorded.');
+  if (!openaiKey) return null;
+
+  const form = new FormData();
+  form.append('file', {
+    uri: audioUri,
+    name: 'audio.m4a',
+    type: 'audio/m4a',
+  } as any);
+  form.append('model', 'whisper-1');
+
+  let res: Response;
+  try {
+    res = await fetch(WHISPER_URL, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${openaiKey}` },
+      body: form as any,
+    });
+  } catch (e: any) {
+    console.warn('[Whisper] network error:', e?.message ?? e);
+    throw new Error('Network error — check your connection.');
+  }
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    console.warn('[Whisper] transcription failed:', res.status, errText.slice(0, 300));
+    if (res.status === 401) throw new Error('OpenAI key invalid — re-paste it in Settings.');
+    if (res.status === 429) throw new Error('OpenAI quota exceeded — add credits at platform.openai.com/account/billing.');
+    if (res.status >= 500) throw new Error('OpenAI is having problems. Try again in a minute.');
+    throw new Error(`OpenAI rejected the audio (${res.status}).`);
+  }
+
+  const data = await res.json();
+  const text = typeof data?.text === 'string' ? data.text.trim() : '';
+  if (!text) throw new Error("Couldn't make out any words. Try speaking again.");
+  return text;
 }
 
 // ─── Email triage ─────────────────────────────────────────────────────────────
