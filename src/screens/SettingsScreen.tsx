@@ -248,7 +248,7 @@ export function SettingsScreen() {
                   .then((result) => console.log('[Settings] promptAsync result:', JSON.stringify(result)))
                   .catch((e) => {
                     console.error('[Settings] promptAsync error:', e?.message ?? e);
-                    Alert.alert('Sign-in error', e?.message ?? 'Unknown error');
+                    Alert.alert("Couldn't sign you in", e?.message ?? 'Unknown error');
                   });
               }}
               disabled={!request}

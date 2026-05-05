@@ -144,7 +144,14 @@ export function HomeScreen() {
         });
       }
     }
-    return { feedCards: visibleCards, bundleHeroes: heroes };
+    // Hide bundled cards from the main feed — they live inside the Bundle
+    // hero now. Without this, the same 3+ same-kind cards render twice
+    // (once collapsed inside the Bundle, once individually below it).
+    const bundledKinds = new Set(heroes.map((h) => h.id.slice('bundle-'.length)));
+    const filtered = visibleCards.filter(
+      (c) => !bundledKinds.has(c.primaryAction.kind)
+    );
+    return { feedCards: filtered, bundleHeroes: heroes };
   }, [visibleCards]);
 
   // Bundle heroes go above the regular hero card.

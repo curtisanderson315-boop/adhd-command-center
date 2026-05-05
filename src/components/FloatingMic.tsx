@@ -383,7 +383,12 @@ export function FloatingMic() {
       });
       void startRecording();
       driveAutoStopTimerRef.current = setTimeout(() => {
-        if (isRecording) void handleRecordingComplete();
+        // Read from the ref, not the captured `isRecording` state — the
+        // state was false when this closure was created (startRecording's
+        // setIsRecording(true) hadn't flushed yet) so the previous
+        // `if (isRecording)` guard always no-op'd. The ref tracks Drive
+        // Mode liveness and gets reset by handleRecordingComplete.
+        if (driveModeRef.current) void handleRecordingComplete();
       }, DRIVE_MODE_AUTO_STOP_MS);
     });
   }, [isRecording, isProcessing]);
