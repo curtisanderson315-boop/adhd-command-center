@@ -559,3 +559,95 @@ Curtis added a "Review Protocol — After Every Phase Commit (MANDATORY)" sectio
 That's where this session ends. Device smoke tests are Curtis's job. The IPA on disk renders all v2 changes (these were pure JS edits — no native rebuild required).
 
 ---
+
+## 2026-05-05 — Device testing iteration 1 fixes
+
+Curtis ran v2 on device and surfaced three issues. Bug 1 was the upstream cause; Bug 2 was its silent-failure symptom; Bug 3 was a UX redesign request after seeing the sequential bundle stepper in motion.
+
+### Bug 1: Anthropic 429 rate limit on email triage  (commit `e99c31ac`)
+
+**Symptom on device:** "Claude API error 429: rate_limit_error — Number of concurrent connections has exceeded your rate limit." Inbox tab fanned out 16 parallel `triageEmail` calls via `Promise.all`; Anthropic's concurrent-connection cap kills any naive fan-out at 10+.
+
+**Fix — throttle, not batch.** Built `runWithConcurrency<T,R>(items, fn, opts)` in `src/services/utils.ts` with defaults `concurrency=2`, `spacingMs=250`, per-item error isolation, ordered output, null fallback for failures. Replaced both fan-out sites:
+- `src/screens/TriageScreen.tsx:124` — foreground triage refresh
+- `src/services/background.ts:84` — background poll triage
+
+Greppped the rest of the codebase for `Promise.all` near `api.anthropic.com`. Zero remaining sites — `activationCoach` already runs serially, `smartScan` and `contextMiner` make single calls per invocation. Other `Promise.all` sites hit Gmail/SecureStore/AsyncStorage — out of scope.
+
+**Why throttle over batch:** changing `TRIAGE_SYSTEM_PROMPT` to handle a list of emails would risk model-behavior drift (and we can't verify without burning tokens), one bad model response would lose all 16 results, and the throttle utility is reusable for any future Claude fan-out.
+
+### Bug 2: Voice capture silently failing on subsequent recordings  (commit `0b3dfb2b`)
+
+**Symptom on device:** first capture worked end-to-end (Whisper → contextMiner / processVoiceInput → ActionCard in Now Feed). Second and later captures appeared to record + transcribe but no card appeared, no toast, no error. Almost certainly Bug 1 in disguise — `processVoiceInput` hits the same 429 ceiling and the error gets swallowed.
+
+**Fix — instrumentation + visible toast.** Touched only `src/components/FloatingMic.tsx`; `src/services/ai.ts` entry points unchanged.
+
+Console logs at every pipeline boundary so the next failure can be traced from a Metro transcript without another iteration:
+- recording STARTED
+- recording STOPPED (uri length or NULL)
+- Whisper RETURNED (transcript length)
+- tryContextMine (hinted? signed in? cached count? matched? reason)
+- processTranscript ENTRY (text length, drive-mode flag)
+- processVoiceInput RETURNED (action count)
+- per-action addCapture + routeAction (id, type, title)
+- processTranscript EXIT (success / ERROR with stack trim)
+
+Inline error toast at the top of the screen replaces three transient `Alert.alert` calls (transcribe, process, mic-start). Auto-dismisses after 4.5s. Anti-shame copy ("Couldn't pull that up. Try again?"). Rate-limit detection regex `/429|rate[_ ]?limit|concurrent/i` produces a specific message ("Hit the Claude rate limit. Give it a sec and try again.") so Curtis isn't left guessing if Bug 1 ever resurfaces. Setup-action alerts (Add your Claude key, OpenAI key, mic permission) stay as `Alert.alert` because they require navigating elsewhere, not retrying.
+
+### Bug 3: Bundle list view + archive + Undo banner  (commit `29d784da`)
+
+**Spec from device testing:** sequential card stepper replaced with a list pattern. Tap a row to expand inline. Dismiss → archive (recoverable). Undo banner globally available.
+
+**New components:**
+- `src/components/BundleListView.tsx` — list of compact rows with [primary action button] + [dismiss icon]; tap header to animate `maxHeight` + opacity expand revealing `firstStep`, `secondaryActions`, related-email count. Replaces `BundleStack.tsx` (deleted).
+- `src/components/UndoBanner.tsx` — Gmail-style toast at bottom-of-screen above the FAB clearance. Slide-up + fade-in on `requestUndoBanner`, auto-dismiss after 5s, undo handler on tap. Rendered ONCE at `App.tsx` level via `<UndoBanner />` so any screen can pop it.
+- `src/services/undoBanner.ts` — pub/sub matching the `voiceTrigger.ts` shape.
+
+**Store + types:**
+- `ActionCard.archivedAt: string | null` (optional field).
+- `archivedCards: ActionCard[]` state, persisted under new key `@adhd:archivedCards`.
+- `archiveCard(card)`: stamps `archivedAt` + `status='dismissed'`, stashes in `archivedCards`, removes from `actionCards` if present.
+- `restoreCard(id)`: pulls back from archive. Manual cards (`ctx-`/`bundle-`/`manual-`) are re-upserted into `actionCards`; source-projected cards reappear automatically on next projection.
+- 30-day TTL: `hydrate()` purges entries older than `ARCHIVE_TTL_MS` on every app open and persists the trimmed list.
+
+**Wiring:**
+- `HomeScreen.tsx` `visibleCards` filters out any card whose id is in `archivedCards`.
+- Bundle modal `cards` prop pre-filters against `archivedCards` so dismissed members vanish from the list immediately.
+- `onDismiss` → `archiveCard(c)` + `requestUndoBanner({ message, onUndo: () => restoreCard(c.id) })`.
+
+**Out of scope for v1.1:** Now Feed swipe-to-dismiss still routes to source-specific dismiss (existing behavior). Unifying that with the archive flow is a follow-up if Curtis wants the global undo to cover swipes too.
+
+### Review pass
+
+Spawned three general-purpose review agents in parallel (one per fix commit) using the Review Protocol from `AUTONOMOUS_PROMPT.md`. Each ran the 7-check protocol against its assigned commit hash. Type and null-byte checks were verified once by the parent.
+
+| Bug | Commit     | Verdict   |
+|-----|------------|-----------|
+| 1   | `e99c31ac` | SHIP IT   |
+| 2   | `0b3dfb2b` | SHIP IT   |
+| 3   | `29d784da` | SHIP IT   |
+
+No fixup commit needed — all three landed clean on the first pass.
+
+### What didn't ship in this iteration
+
+- Now Feed swipe-to-dismiss still uses source-specific dismiss; the new global Undo banner is wired only for Bundle list dismiss. If Curtis wants a unified flow, that's a 30-min follow-up.
+- Bug 2 toast is in-component on `FloatingMic`; could be migrated to the global toast pattern (`requestUndoBanner` shape) for consistency, but the toast doesn't need an Undo handler so the existing local UI is fine.
+- Voice-controlled "next"/"done" inside Focus Mode and iOS-native silence detection in Drive Mode remain deferred (no API surface).
+
+### Verification
+
+- `npx tsc --noEmit`: exit 0 after each commit.
+- Null-byte preflight: `app.json`, `package.json`, `eas.json`, `tsconfig.json` all 0 bytes.
+- Working tree clean before this PROGRESS_LOG commit (verified pre-stage).
+
+### Curtis's next move
+
+Reload Metro on the device. Smoke test in this order:
+1. **Inbox refresh** — pull-to-refresh with 10+ unread emails. Should NOT 429. Watch the Metro console for any `[TriageScreen.triage]` or `[BackgroundPoll.triage]` warnings (those are per-item failures from the throttle helper, expected to be rare and isolated).
+2. **Voice capture, repeat 5x** — hold mic, speak, release. Card should appear each time. If any fail, look for `[FloatingMic][voice]` log lines — they'll narrate the exact failure point. Toast should appear if Claude errors.
+3. **Bundle list flow** — capture 3+ same-shape items (e.g., three "buy X" tasks). Now Feed should show a Bundle hero card. Tap it → list view, tap a row to expand, tap primary action or dismiss. Dismissing pops the Undo banner at the bottom; tap Undo within 5s to restore.
+
+If anything still misbehaves, paste the Metro log line (look for `[FloatingMic][voice]`, `[TriageScreen.triage]`, `[BackgroundPoll.triage]`, or `[UndoBanner]`) into a new session.
+
+---
