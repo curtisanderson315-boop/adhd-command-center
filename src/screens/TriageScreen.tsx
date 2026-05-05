@@ -34,7 +34,7 @@ import * as Notifications from 'expo-notifications';
 import { useAppStore } from '../store';
 import { PriorityBadge } from '../components/PriorityBadge';
 import { colors, spacing, radius, typography } from '../theme';
-import { relativeTime, nanoid } from '../services/utils';
+import { relativeTime, nanoid, runWithConcurrency } from '../services/utils';
 import {
   fetchUnreadEmails,
   createDraft,
@@ -121,9 +121,15 @@ export function TriageScreen() {
           setLastTriageAt(Date.now());
           return;
         }
-        const triaged = await Promise.all(
-          rawEmails.map((e) => triageEmail(e, settings.anthropicKey))
+        // Throttled fan-out: Anthropic's concurrent-connection limit kills
+        // a naive Promise.all over 10+ unread emails (was hitting 429
+        // "Number of concurrent connections has exceeded your rate limit").
+        const triagedRaw = await runWithConcurrency(
+          rawEmails,
+          (e) => triageEmail(e, settings.anthropicKey),
+          { concurrency: 2, spacingMs: 250, label: 'TriageScreen.triage' }
         );
+        const triaged = triagedRaw.filter((t): t is NonNullable<typeof t> => t !== null);
         const order = { urgent: 0, action_needed: 1, fyi: 2, noise: 3 };
         triaged.sort((a, b) => order[a.priority] - order[b.priority]);
         setTriageQueue(triaged);

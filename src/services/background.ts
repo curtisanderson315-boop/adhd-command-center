@@ -20,6 +20,7 @@ import { dedupKey, scanForSuggestions } from './smartScan';
 import { runActivationCoach } from './activationCoach';
 import { syncSourcesToActionCards } from './actionCards';
 import { runReceiptIndexer } from './receiptIndex';
+import { runWithConcurrency } from './utils';
 
 export const ADHD_EMAIL_POLL = 'ADHD_EMAIL_POLL';
 export const NOTIFICATION_TAP_ROUTE = 'ADHD_NOTIFICATION_ROUTE';
@@ -81,9 +82,15 @@ async function runEmailPoll(): Promise<boolean> {
   // ── Step 1: Triage new emails (existing path) ────────────────────────────
   let triaged: TriagedEmail[] = [];
   if (rawEmails.length > 0) {
-    triaged = await Promise.all(
-      rawEmails.map((e) => triageEmail(e, settings.anthropicKey))
+    // Throttled fan-out — Anthropic 429s a naive Promise.all on
+    // moderately-sized inboxes. Keep concurrency low here (background
+    // task is less urgent than foreground refresh).
+    const triagedRaw = await runWithConcurrency(
+      rawEmails,
+      (e) => triageEmail(e, settings.anthropicKey),
+      { concurrency: 2, spacingMs: 250, label: 'BackgroundPoll.triage' }
     );
+    triaged = triagedRaw.filter((t): t is NonNullable<typeof t> => t !== null);
 
     const order = { urgent: 0, action_needed: 1, fyi: 2, noise: 3 };
     triaged.sort((a, b) => order[a.priority] - order[b.priority]);
