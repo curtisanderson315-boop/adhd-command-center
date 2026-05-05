@@ -724,3 +724,72 @@ Reload Metro (or hot-reload — these are pure JS edits). Smoke test:
 If anything misbehaves, the existing log lines (`[FloatingMic][voice]`, `[TriageScreen.triage]`, etc.) will narrate the failure. Bug A's fix didn't need new converter logging — the bug was a deterministic projection issue, not a runtime mystery.
 
 ---
+
+## 2026-05-05 — Device testing iteration 3 fixes
+
+Curtis took the iter-2 build to device. Two real misses:
+
+> "the recording is working, transcription is working. but it created two tasks, one has 'got it' the other has 'mark complete'. It did this for every recording. there are still tons of duplicates in the 'all' tab"
+
+Both shipped clean on first review.
+
+### Issue 1: Two ActionCards per voice recording  (commit `b28e5a03`)
+
+**Symptom on device:** every voice recording produced two cards. One labeled "Got it" (the routed-voice projection introduced in Bug A's fix) and one labeled "Mark done" (the Task projection from `cardFromTask`). The user's mental model: "I said one thing — why are there two cards?"
+
+**Root cause:** `routeAction(type='task')` does both `addTask(newTask)` AND `updateCapture(status='routed')` on the parent CapturedAction. Both then project independently:
+- The routed CapturedAction projects via `cardFromCapturedAction` as a "Got it" voice card (post-Bug A: routed captures stay `pending` so they surface).
+- The new Task projects via `cardFromTask` as a "Mark done" card.
+
+Bug A surfaced routed voice captures so Curtis could SEE the side effect happened — but for `type='task'` specifically, the Task itself already provides that surface. Two cards for the same recording.
+
+**Fix in `src/services/actionCards.ts` `projectAllSources`:** filter out captures where `type === 'task' && status === 'routed'`. The Task card stands alone. Other routed types keep their voice card because nothing else surfaces them locally:
+- `gmail_draft`: lives in Gmail Drafts (no local entity)
+- `calendar_event`: lives in Google Calendar (no local entity)
+- `note`: addNote stores it but Notes don't project to cards
+
+Reviewer verified the lifecycle: routed Task → projects pending → tap "Mark done" → `toggleTask` flips `completed: true` → projects with status `done` → `visibleCards` filter excludes it. Clean.
+
+### Issue 2: "Tons of duplicates" in All tab  (commit `92f784fd`)
+
+**Honest assessment:** Bug B from iter 2 only fixed *new* SmartSuggestions. Persisted state from before that commit still had nanoid ids — different per scan even when content matched. `dedupeById` only collapses exact id matches, so the legacy duplicates slipped through every hydrate.
+
+This iteration delivers the actual cleanup that Bug B implied but didn't ship. Three sub-fixes, all in `hydrate()`:
+
+**(1) Migrate persisted SmartSuggestion ids.** For every suggestion in `@adhd:suggestions`, recompute the expected id as `stableHash(suggestionDedupKey(s))`. If it doesn't match the stored id, swap. Then `dedupeById` collapses content-equivalent entries that now share an id. Persistence triggered when *either* length changed *or* any id was rewritten.
+
+**(2) Drop orphan smart-prefixed entries from `@adhd:actionCards`.** `syncSourcesToActionCards` (background poll step 3) writes projected smart cards into persistent storage. After old scans, those entries pin to `smart-${oldnanoid}` ids that no longer match any current projection's `smart-${newhash}` id. `mergeStoredOverlays` then treats them as user-authored ctx-style cards and renders them forever. Filter: keep `smart-` entries only if their id is in `validSmartIds` (built from the post-migration, post-dedupe SmartSuggestion list). `voice-`/`task-`/`email-` entries kept — they hold firstStep enrichments the activation coach needs.
+
+**(3) Collapse ctx- cards by content.** Curtis recording the same intent twice ("reorder Brita filters" Monday and Wednesday) produces a fresh `ctx-${nanoid}` card from `contextMiner` each time. Group ctx- entries by `${title}|${JSON.stringify(primaryAction)}` and keep the latest `createdAt`. ContextMiner doesn't have a stable content key today; the primaryAction encodes the deep-link target, so this is a reasonable proxy.
+
+**Side effect (logged in the commit):** SmartSuggestions previously archived under their old `smart-${oldnanoid}` id will resurface once because the archive entry no longer matches any current projection. Curtis re-archives once; the feed stays clean afterwards. Acceptable trade for clearing the persistent duplicate pile.
+
+### Review pass
+
+2 general-purpose review subagents in parallel — one per commit. Type and null-byte checks verified once by parent.
+
+| Issue | Commit     | Verdict | Notes                                                          |
+|-------|------------|---------|----------------------------------------------------------------|
+| 1     | `b28e5a03` | SHIP IT | All 7 PASS. Lifecycle of Task projection verified clean (toggleTask flips status to done → filtered). One non-blocking edge note about hypothetical "undo route" path. |
+| 2     | `92f784fd` | SHIP IT | All 7 PASS, all 8 issue-specific sub-checks PASS. Persistence conditions verified sufficient. Type compatibility (`Pick<...>` accepts wider `SmartSuggestion`) confirmed. Side-effect re-archive cost acknowledged and accepted. |
+
+No fixup commits needed.
+
+### Verification
+
+- `npx tsc --noEmit`: exit 0 after each commit.
+- Null-byte preflight: app.json / package.json / eas.json / tsconfig.json all 0 bytes.
+
+### Curtis's next move
+
+Reload Metro. Kill and re-launch the app once so `hydrate()` runs the migration / orphan-drop / ctx-dedupe pass against existing storage. Then smoke test:
+
+1. **Voice → Task: one card.** Hold mic, say "remind me to take out the trash." Single ActionCard appears in Today section with title set + "Mark done" button. (Pre-fix: two cards, "Got it" + "Mark done".)
+2. **Voice → Gmail draft: still surfaces.** Hold mic, say "draft an email to Marcus about Friday." Single voice card in Today with "Captured by voice • Gmail draft saved" context and "Got it" button. The actual draft is in Gmail.
+3. **All tab cleanup.** Open All tab. Stale duplicate cards from previous scans should be gone after the cold launch. Sections (Today / This Week / Later) should each show distinct entries.
+4. **Re-archive smart cards if needed.** Any previously-archived smart suggestion that resurfaces, swipe-archive once. It stays gone afterwards.
+5. **Background scan duplicate check.** Wait for the next 15-min background scan (or pull-to-refresh on Now). New suggestions don't accumulate duplicates — same content keeps the same id and `setSuggestions` upserts cleanly.
+
+If duplicates persist in any form, paste one of them into a new session with `git show --stat 92f784fd` so I can see what slipped through.
+
+---
