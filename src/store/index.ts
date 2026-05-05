@@ -11,6 +11,8 @@ import type {
   SmartSuggestion,
 } from '../types';
 import { getStoredTriageQueue } from '../services/background';
+import { stableHash } from '../services/utils';
+import { dedupKey as suggestionDedupKey } from '../services/smartScan';
 
 interface AppState {
   // ── Captured items (voice captures) ──────────────────────────────────────
@@ -389,30 +391,76 @@ export const useAppStore = create<AppState>((set, get) => ({
         );
       }
 
-      // Bug B (device-testing iteration 2): one-time dedupe pass over
-      // both actionCards and suggestions on every hydrate. Earlier
-      // builds minted nanoid ids per scan, so the same logical
-      // suggestion accreted multiple entries with different ids.
-      // Collapse by id (keep latest createdAt) and persist if anything
-      // changed. New entries already use stable ids; old entries are
-      // cleaned up here at first launch after the upgrade.
+      // Iteration 3 fix (still Bug B's territory): the previous dedupe
+      // pass collapsed by id only, but persisted SmartSuggestions from
+      // pre-fix scans had nanoid ids — different per scan even when the
+      // content matched. So duplicates with distinct ids slipped through.
+      // Two-step migration:
+      //   (1) Recompute every persisted SmartSuggestion's id under the
+      //       new stableHash(suggestionDedupKey(...)) scheme. Anything
+      //       that was content-equivalent now shares an id.
+      //   (2) Run dedupeById to collapse the now-matching duplicates.
+      const rawSuggestions: SmartSuggestion[] = suggestions
+        ? JSON.parse(suggestions)
+        : [];
+      const migratedSuggestions = rawSuggestions.map((s) => {
+        const expected = stableHash(suggestionDedupKey(s));
+        return s.id === expected ? s : { ...s, id: expected };
+      });
+      const dedupedSuggestions = dedupeById(migratedSuggestions);
+      const suggestionsChanged =
+        dedupedSuggestions.length !== rawSuggestions.length ||
+        migratedSuggestions.some((m, i) => m.id !== rawSuggestions[i]?.id);
+      if (suggestionsChanged) {
+        await AsyncStorage.setItem(
+          STORAGE_KEYS.suggestions,
+          JSON.stringify(dedupedSuggestions)
+        );
+      }
+
+      // ActionCards storage cleanup. Three things happening:
+      //   (1) Drop orphan source-prefixed entries (smart-/voice-/task-/
+      //       email-) that don't match any current SmartSuggestion id.
+      //       These are stale syncSourcesToActionCards writes from
+      //       pre-fix scans — they ride along forever via mergeStored
+      //       Overlays' manualOnly path, surfacing as duplicates.
+      //   (2) Collapse ctx- cards by content (same title +
+      //       primaryAction → keep latest). Curtis's repeat recordings
+      //       of the same intent were producing one ctx- card each.
+      //   (3) dedupeById covers anything that got migrated to a now-
+      //       shared id.
       const rawCards: ActionCard[] = actionCards ? JSON.parse(actionCards) : [];
-      const dedupedCards = dedupeById(rawCards);
+      const validSmartIds = new Set(
+        dedupedSuggestions.map((s) => `smart-${s.id}`)
+      );
+      const cleanedCards = rawCards.filter((c) => {
+        // Smart projections only valid if the underlying SmartSuggestion
+        // still exists post-migration. Other source prefixes (voice/
+        // task/email) keep enrichments — drop only the smart orphans.
+        if (c.id.startsWith('smart-')) return validSmartIds.has(c.id);
+        return true;
+      });
+      const ctxByContent = new Map<string, ActionCard>();
+      const nonCtx: ActionCard[] = [];
+      for (const c of cleanedCards) {
+        if (!c.id.startsWith('ctx-')) {
+          nonCtx.push(c);
+          continue;
+        }
+        const key = `ctx|${c.title}|${JSON.stringify(c.primaryAction)}`;
+        const existing = ctxByContent.get(key);
+        if (
+          !existing ||
+          new Date(c.createdAt).getTime() >= new Date(existing.createdAt).getTime()
+        ) {
+          ctxByContent.set(key, c);
+        }
+      }
+      const dedupedCards = dedupeById([...nonCtx, ...ctxByContent.values()]);
       if (dedupedCards.length !== rawCards.length) {
         await AsyncStorage.setItem(
           STORAGE_KEYS.actionCards,
           JSON.stringify(dedupedCards)
-        );
-      }
-
-      const rawSuggestions: SmartSuggestion[] = suggestions
-        ? JSON.parse(suggestions)
-        : [];
-      const dedupedSuggestions = dedupeById(rawSuggestions);
-      if (dedupedSuggestions.length !== rawSuggestions.length) {
-        await AsyncStorage.setItem(
-          STORAGE_KEYS.suggestions,
-          JSON.stringify(dedupedSuggestions)
         );
       }
 
