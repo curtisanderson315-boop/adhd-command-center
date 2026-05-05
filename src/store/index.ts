@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type {
+  ActionCard,
+  ActionCardStatus,
   CapturedAction,
   TriagedEmail,
   Task,
@@ -47,12 +49,22 @@ interface AppState {
   actionSuggestion: (id: string) => Promise<void>;
   setLastScanAt: (ts: string) => Promise<void>;
 
+  // ── Action Cards (v2 unified surface) ────────────────────────────────────
+  actionCards: ActionCard[];
+  upsertCard: (card: ActionCard) => Promise<void>;
+  upsertCards: (cards: ActionCard[]) => Promise<void>;
+  markCardStatus: (id: string, status: ActionCardStatus) => Promise<void>;
+  dismissCard: (id: string) => Promise<void>;
+  snoozeCard: (id: string, untilISO: string) => Promise<void>;
+  setCardFirstStep: (id: string, firstStep: string) => Promise<void>;
+
   // ── Bootstrap ─────────────────────────────────────────────────────────────
   hydrate: () => Promise<void>;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
   anthropicKey: '',
+  openaiKey: '',
   googleAccessToken: '',
   googleRefreshToken: '',
   googleTokenExpiry: 0,
@@ -70,6 +82,7 @@ const STORAGE_KEYS = {
   triageQueue: '@adhd:triageQueue',
   suggestions: '@adhd:suggestions',
   lastScanAt: '@adhd:lastScanAt',
+  actionCards: '@adhd:actionCards',
 };
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -81,6 +94,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   settings: DEFAULT_SETTINGS,
   suggestions: [],
   lastScanAt: null,
+  actionCards: [],
 
   // ── Captures ───────────────────────────────────────────────────────────────
   addCapture: async (action) => {
@@ -195,6 +209,74 @@ export const useAppStore = create<AppState>((set, get) => ({
     await AsyncStorage.setItem(STORAGE_KEYS.lastScanAt, ts);
   },
 
+  // ── Action Cards ──────────────────────────────────────────────────────────
+  upsertCard: async (card) => {
+    const existing = get().actionCards;
+    const idx = existing.findIndex((c) => c.id === card.id);
+    const next =
+      idx >= 0
+        ? existing.map((c, i) => (i === idx ? { ...c, ...card } : c))
+        : [card, ...existing];
+    set({ actionCards: next });
+    await AsyncStorage.setItem(STORAGE_KEYS.actionCards, JSON.stringify(next));
+  },
+
+  upsertCards: async (cards) => {
+    if (cards.length === 0) return;
+    const existing = get().actionCards;
+    const byId = new Map<string, ActionCard>();
+    for (const c of existing) byId.set(c.id, c);
+    for (const c of cards) {
+      const prev = byId.get(c.id);
+      // Preserve user-added enrichments (firstStep, status overrides) when
+      // the same id is upserted from a fresher source projection.
+      byId.set(c.id, prev ? { ...prev, ...c, firstStep: prev.firstStep ?? c.firstStep } : c);
+    }
+    const next = Array.from(byId.values());
+    set({ actionCards: next });
+    await AsyncStorage.setItem(STORAGE_KEYS.actionCards, JSON.stringify(next));
+  },
+
+  markCardStatus: async (id, status) => {
+    const next = get().actionCards.map((c) =>
+      c.id === id
+        ? {
+            ...c,
+            status,
+            completedAt: status === 'done' ? new Date().toISOString() : c.completedAt,
+          }
+        : c
+    );
+    set({ actionCards: next });
+    await AsyncStorage.setItem(STORAGE_KEYS.actionCards, JSON.stringify(next));
+  },
+
+  dismissCard: async (id) => {
+    const next = get().actionCards.map((c) =>
+      c.id === id ? { ...c, status: 'dismissed' as const } : c
+    );
+    set({ actionCards: next });
+    await AsyncStorage.setItem(STORAGE_KEYS.actionCards, JSON.stringify(next));
+  },
+
+  snoozeCard: async (id, untilISO) => {
+    const next = get().actionCards.map((c) =>
+      c.id === id
+        ? { ...c, status: 'snoozed' as const, snoozeUntil: untilISO }
+        : c
+    );
+    set({ actionCards: next });
+    await AsyncStorage.setItem(STORAGE_KEYS.actionCards, JSON.stringify(next));
+  },
+
+  setCardFirstStep: async (id, firstStep) => {
+    const next = get().actionCards.map((c) =>
+      c.id === id ? { ...c, firstStep } : c
+    );
+    set({ actionCards: next });
+    await AsyncStorage.setItem(STORAGE_KEYS.actionCards, JSON.stringify(next));
+  },
+
   // ── Hydrate from storage ───────────────────────────────────────────────────
   hydrate: async () => {
     try {
@@ -207,6 +289,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         backgroundQueue,
         suggestions,
         lastScanAt,
+        actionCards,
       ] = await Promise.all([
         AsyncStorage.getItem(STORAGE_KEYS.captures),
         AsyncStorage.getItem(STORAGE_KEYS.tasks),
@@ -216,6 +299,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         getStoredTriageQueue(),
         AsyncStorage.getItem(STORAGE_KEYS.suggestions),
         AsyncStorage.getItem(STORAGE_KEYS.lastScanAt),
+        AsyncStorage.getItem(STORAGE_KEYS.actionCards),
       ]);
 
       set({
@@ -229,6 +313,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         triageQueue: backgroundQueue,
         suggestions: suggestions ? JSON.parse(suggestions) : [],
         lastScanAt: lastScanAt ?? null,
+        actionCards: actionCards ? JSON.parse(actionCards) : [],
       });
     } catch (e) {
       console.error('Failed to hydrate store:', e);

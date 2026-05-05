@@ -81,6 +81,7 @@ export interface Note {
 
 export interface AppSettings {
   anthropicKey: string;
+  openaiKey: string;
   googleAccessToken: string;
   googleRefreshToken: string;
   googleTokenExpiry: number;
@@ -117,4 +118,73 @@ export interface SmartSuggestion {
   sourceEmailId?: string | null;
   createdAt: string;
   status: 'pending' | 'actioned' | 'dismissed';
+}
+
+// ─── Action Cards (v2 unified surface) ─────────────────────────────────────
+
+export type ActionUrgency = 'now' | 'today' | 'this_week' | 'someday';
+
+export type ActionCardStatus =
+  | 'pending'
+  | 'in_progress'
+  | 'done'
+  | 'dismissed'
+  | 'snoozed';
+
+export type ActionPayload =
+  | { kind: 'open_url'; url: string; label: string }
+  | {
+      kind: 'create_calendar';
+      event: {
+        title: string;
+        date: string | null;          // ISO 8601
+        durationMinutes: number;
+        notes?: string;
+      };
+      label: string;
+    }
+  | {
+      kind: 'create_draft';
+      emailId: string;
+      subject: string;
+      body: string;
+      label: string;
+    }
+  | {
+      kind: 'reorder_amazon';
+      asin?: string;
+      query: string;
+      label: string;
+    }
+  | {
+      kind: 'add_task';
+      bucket: 'today' | 'upcoming' | 'someday';
+      label: string;
+    }
+  | { kind: 'mark_done'; label: string }
+  | { kind: 'snooze'; until: string; label: string };
+
+export interface ActionCard {
+  id: string;
+  source: 'voice' | 'email' | 'calendar' | 'smart_scan' | 'manual';
+  /** Imperative, < 60 chars: "Reorder Simplehuman hinge" */
+  title: string;
+  /** One sentence with provenance */
+  context: string;
+  urgency: ActionUrgency;
+  /** The big button on the card */
+  primaryAction: ActionPayload;
+  /** Up to 2 — text links below the primary */
+  secondaryActions?: ActionPayload[];
+  /** For activation-blocked tasks: literal physical first step */
+  firstStep?: string | null;
+  /** Threads to read when expanding the card */
+  relatedEmailIds?: string[];
+  /** ID of the source object (Task id, SmartSuggestion id, TriagedEmail id, CapturedAction id) */
+  sourceId?: string | null;
+  /** ISO 8601 */
+  createdAt: string;
+  status: ActionCardStatus;
+  snoozeUntil?: string | null;
+  completedAt?: string | null;
 }
