@@ -6,6 +6,25 @@ export function nanoid(): string {
 }
 
 /**
+ * Deterministic short-string hash. djb2 variant. Used to build stable
+ * ActionCard / SmartSuggestion ids out of content (so the same logical
+ * scan result collapses across re-runs instead of producing a new id
+ * every 15 minutes). 8 hex chars, ~32-bit range — collision probability
+ * is fine at the per-user / per-day scale we care about.
+ *
+ * Same input always returns the same output. Independent of clock,
+ * RNG, or process state.
+ */
+export function stableHash(input: string): string {
+  let h = 5381;
+  for (let i = 0; i < input.length; i++) {
+    h = ((h << 5) + h) ^ input.charCodeAt(i);
+  }
+  // >>> 0 forces unsigned, then to 8-char hex padded
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+/**
  * Encodes a string to base64url (used for Gmail MIME messages)
  */
 export function toBase64Url(str: string): string {

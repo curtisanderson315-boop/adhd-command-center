@@ -13,7 +13,7 @@
 import type { SmartSuggestion, SuggestionAction, SuggestionType } from '../types';
 import type { RawEmail } from './gmail';
 import type { CalendarEvent } from './calendar';
-import { nanoid } from './utils';
+import { stableHash } from './utils';
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_VERSION = '2023-06-01';
@@ -185,17 +185,42 @@ function normalizeSuggestion(item: RawSuggestion): SmartSuggestion | null {
   const action = normalizeAction(item.action);
   if (!action) return null;
 
+  const title = String(item.title).slice(0, 120);
+  const context = String(item.context).slice(0, 240);
+  const sourceEmailId = item.sourceEmailId ?? null;
+
+  // Bug B (device-testing iteration 2): ids must be deterministic so the
+  // same logical scan result collapses across runs. Using nanoid here
+  // meant every 15-minute background scan minted a new id for the same
+  // content, and setSuggestions' merge-by-id silently appended.
+  // No 'smart-' prefix — that namespace belongs to ActionCard.id; the
+  // SmartSuggestion lives in a typed array of its own.
   return {
-    id: nanoid(),
+    id: stableHash(suggestionDedupKey(type, title, sourceEmailId)),
     type,
-    title: String(item.title).slice(0, 120),
-    context: String(item.context).slice(0, 240),
+    title,
+    context,
     urgency,
     action,
-    sourceEmailId: item.sourceEmailId ?? null,
+    sourceEmailId,
     createdAt: new Date().toISOString(),
     status: 'pending',
   };
+}
+
+/**
+ * Stronger dedup key than the original (type + title) — adds sourceEmailId
+ * so two unrelated suggestions that happen to share a generic title still
+ * get distinct ids. Internal helper used by both id-minting and the
+ * background merge step.
+ */
+function suggestionDedupKey(
+  type: string,
+  title: string,
+  sourceEmailId: string | null | undefined
+): string {
+  const norm = title.toLowerCase().replace(/\s+/g, ' ').trim();
+  return `${type}|${norm}|${sourceEmailId ?? ''}`;
 }
 
 function normalizeAction(raw: unknown): SuggestionAction | null {
@@ -259,10 +284,12 @@ function normalizeAction(raw: unknown): SuggestionAction | null {
 }
 
 /**
- * Dedup helper used by the background merge step. Two suggestions are treated
- * as duplicates if they share (type, title) — title is normalized to lowercase
- * with whitespace collapsed.
+ * Dedup helper used by the background merge step. Now derives from the
+ * same content key as the id minting (stable across runs, includes
+ * sourceEmailId for disambiguation).
  */
-export function dedupKey(s: Pick<SmartSuggestion, 'type' | 'title'>): string {
-  return `${s.type}|${s.title.toLowerCase().replace(/\s+/g, ' ').trim()}`;
+export function dedupKey(
+  s: Pick<SmartSuggestion, 'type' | 'title' | 'sourceEmailId'>
+): string {
+  return suggestionDedupKey(s.type, s.title, s.sourceEmailId);
 }

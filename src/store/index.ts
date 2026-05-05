@@ -93,6 +93,26 @@ const STORAGE_KEYS = {
 
 const ARCHIVE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
+/**
+ * Collapse entries that share an id, keeping the one with the latest
+ * createdAt (or the last one in input order if createdAt is missing).
+ * Used by hydrate() to clean up legacy duplicates from earlier builds.
+ */
+function dedupeById<T extends { id: string; createdAt?: string }>(items: T[]): T[] {
+  const byId = new Map<string, T>();
+  for (const item of items) {
+    const existing = byId.get(item.id);
+    if (!existing) {
+      byId.set(item.id, item);
+      continue;
+    }
+    const aT = item.createdAt ? new Date(item.createdAt).getTime() : 0;
+    const bT = existing.createdAt ? new Date(existing.createdAt).getTime() : 0;
+    if (aT >= bT) byId.set(item.id, item);
+  }
+  return Array.from(byId.values());
+}
+
 export const useAppStore = create<AppState>((set, get) => ({
   captures: [],
   triageQueue: [],
@@ -369,6 +389,33 @@ export const useAppStore = create<AppState>((set, get) => ({
         );
       }
 
+      // Bug B (device-testing iteration 2): one-time dedupe pass over
+      // both actionCards and suggestions on every hydrate. Earlier
+      // builds minted nanoid ids per scan, so the same logical
+      // suggestion accreted multiple entries with different ids.
+      // Collapse by id (keep latest createdAt) and persist if anything
+      // changed. New entries already use stable ids; old entries are
+      // cleaned up here at first launch after the upgrade.
+      const rawCards: ActionCard[] = actionCards ? JSON.parse(actionCards) : [];
+      const dedupedCards = dedupeById(rawCards);
+      if (dedupedCards.length !== rawCards.length) {
+        await AsyncStorage.setItem(
+          STORAGE_KEYS.actionCards,
+          JSON.stringify(dedupedCards)
+        );
+      }
+
+      const rawSuggestions: SmartSuggestion[] = suggestions
+        ? JSON.parse(suggestions)
+        : [];
+      const dedupedSuggestions = dedupeById(rawSuggestions);
+      if (dedupedSuggestions.length !== rawSuggestions.length) {
+        await AsyncStorage.setItem(
+          STORAGE_KEYS.suggestions,
+          JSON.stringify(dedupedSuggestions)
+        );
+      }
+
       set({
         captures: captures ? JSON.parse(captures) : [],
         tasks: tasks ? JSON.parse(tasks) : [],
@@ -378,9 +425,9 @@ export const useAppStore = create<AppState>((set, get) => ({
           : DEFAULT_SETTINGS,
         lastTriageAt: lastTriageAt ? Number(lastTriageAt) : null,
         triageQueue: backgroundQueue,
-        suggestions: suggestions ? JSON.parse(suggestions) : [],
+        suggestions: dedupedSuggestions,
         lastScanAt: lastScanAt ?? null,
-        actionCards: actionCards ? JSON.parse(actionCards) : [],
+        actionCards: dedupedCards,
         archivedCards: purgedArchived,
       });
     } catch (e) {
