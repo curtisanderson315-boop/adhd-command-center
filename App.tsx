@@ -10,7 +10,7 @@ import type { NavigationContainerRef } from '@react-navigation/native';
 
 import { HomeScreen } from './src/screens/HomeScreen';
 import { TriageScreen } from './src/screens/TriageScreen';
-import { TasksScreen } from './src/screens/TasksScreen';
+import { AllScreen } from './src/screens/AllScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
 import { FloatingMic } from './src/components/FloatingMic';
 import { UndoBanner } from './src/components/UndoBanner';
@@ -32,7 +32,7 @@ const Tab = createBottomTabNavigator();
 
 const TABS = [
   { name: 'Now',      component: HomeScreen,     icon: '✨', label: 'Now'      },
-  { name: 'All',      component: TasksScreen,    icon: '✅', label: 'All'      },
+  { name: 'All',      component: AllScreen,      icon: '✅', label: 'All'      },
   { name: 'Inbox',    component: TriageScreen,   icon: '📥', label: 'Inbox'    },
   { name: 'Settings', component: SettingsScreen, icon: '⚙️', label: 'Settings' },
 ];
@@ -56,17 +56,22 @@ export default function App() {
   const triageQueue = useAppStore((s) => s.triageQueue);
   const suggestions = useAppStore((s) => s.suggestions);
   const storedCards = useAppStore((s) => s.actionCards);
+  const archivedCards = useAppStore((s) => s.archivedCards);
   const triageInterval = useAppStore((s) => s.settings.triageIntervalMinutes);
   const navRef = useRef<NavigationContainerRef<any>>(null);
 
-  // Open ActionCard count for the Now tab badge — same projection the screen uses.
+  // Now-tab badge: count cards visible in NowFeed (urgency in {now, today}).
+  // Cards in this_week / someday show in the All tab and don't drive this badge.
   const openCount = useMemo(() => {
     const projected = projectAllSources({ captures, tasks, triageQueue, suggestions });
     const merged = mergeStoredOverlays(projected, storedCards);
+    const archivedIds = new Set(archivedCards.map((c) => c.id));
     return merged
+      .filter((c) => !archivedIds.has(c.id))
       .filter((c) => c.status === 'pending')
+      .filter((c) => c.urgency === 'now' || c.urgency === 'today')
       .sort(compareCards).length;
-  }, [captures, tasks, triageQueue, suggestions, storedCards]);
+  }, [captures, tasks, triageQueue, suggestions, storedCards, archivedCards]);
 
   // ── Bootstrap: hydrate, register Siri, wire notification taps ──────────
   useEffect(() => {

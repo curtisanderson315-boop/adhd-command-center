@@ -21,9 +21,10 @@ import {
   RefreshControl,
   Alert,
   ScrollView,
+  Pressable,
   Linking,
 } from 'react-native';
-import { useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { useAppStore } from '../store';
 import { ActionCard } from '../components/ActionCard';
 import { FocusMode } from '../components/FocusMode';
@@ -88,6 +89,8 @@ export function HomeScreen() {
   const archiveCard = useAppStore((s) => s.archiveCard);
   const restoreCard = useAppStore((s) => s.restoreCard);
 
+  const navigation = useNavigation<any>();
+
   const [scanning, setScanning] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [focusCard, setFocusCard] = useState<ActionCardModel | null>(null);
@@ -103,11 +106,10 @@ export function HomeScreen() {
 
   // ── Project sources → cards → filter visible ────────────────────────────
 
-  const visibleCards = useMemo(() => {
+  // All open cards (every horizon). Used for the future-counts footer link.
+  const allOpen = useMemo(() => {
     const projected = projectAllSources({ captures, tasks, triageQueue, suggestions });
     const merged = mergeStoredOverlays(projected, storedCards);
-    // Cards archived via Bundle list dismiss vanish from the feed until
-    // the user taps Undo on the banner (or the 30-day TTL purges them).
     const archivedIds = new Set(archivedCards.map((c) => c.id));
     const now = Date.now();
     return merged
@@ -115,13 +117,31 @@ export function HomeScreen() {
       .filter((c) => {
         if (c.status === 'pending') return true;
         if (c.status === 'snoozed' && c.snoozeUntil) {
-          // snoozed cards reappear once their window has elapsed
           return new Date(c.snoozeUntil).getTime() < now;
         }
         return false;
       })
       .sort(compareCards);
   }, [captures, tasks, triageQueue, suggestions, storedCards, archivedCards]);
+
+  // Now-Feed urgency filter: only Today (incl. Now). Everything beyond
+  // this horizon lives in the All tab. Reduces the cognitive load of
+  // seeing this-week + someday work alongside the action you should
+  // be taking right now.
+  const visibleCards = useMemo(
+    () => allOpen.filter((c) => c.urgency === 'now' || c.urgency === 'today'),
+    [allOpen]
+  );
+
+  const futureCounts = useMemo(() => {
+    let thisWeek = 0;
+    let later = 0;
+    for (const c of allOpen) {
+      if (c.urgency === 'this_week') thisWeek++;
+      else if (c.urgency === 'someday') later++;
+    }
+    return { thisWeek, later };
+  }, [allOpen]);
 
   // ── Bundle detection ────────────────────────────────────────────────────
   // 3+ pending cards sharing the same primaryAction.kind get a synthetic
@@ -443,7 +463,34 @@ export function HomeScreen() {
             />
           )}
           refreshControl={refreshControl}
-          ListFooterComponent={<View style={{ height: 120 }} />}
+          ListFooterComponent={
+            <View style={styles.footerWrap}>
+              {(futureCounts.thisWeek > 0 || futureCounts.later > 0) ? (
+                <Pressable
+                  onPress={() =>
+                    navigation.navigate('All', {
+                      expandSection:
+                        futureCounts.thisWeek > 0 ? 'this_week' : 'later',
+                    })
+                  }
+                  hitSlop={8}
+                >
+                  <Text style={styles.footerLink}>
+                    {[
+                      futureCounts.thisWeek > 0
+                        ? `${futureCounts.thisWeek} this week`
+                        : null,
+                      futureCounts.later > 0 ? `${futureCounts.later} later` : null,
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')}{' '}
+                    →
+                  </Text>
+                </Pressable>
+              ) : null}
+              <View style={{ height: 120 }} />
+            </View>
+          }
         />
       )}
 
@@ -525,5 +572,16 @@ const styles = StyleSheet.create({
     color: colors.textPrimary,
     fontSize: 16,
     fontWeight: '600',
+  },
+  footerWrap: {
+    paddingTop: spacing.md,
+    paddingHorizontal: spacing.lg,
+    alignItems: 'center',
+  },
+  footerLink: {
+    color: colors.purple,
+    fontSize: 14,
+    fontWeight: '600',
+    paddingVertical: 8,
   },
 });
