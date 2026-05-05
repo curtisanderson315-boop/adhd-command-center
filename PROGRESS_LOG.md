@@ -793,3 +793,66 @@ Reload Metro. Kill and re-launch the app once so `hydrate()` runs the migration 
 If duplicates persist in any form, paste one of them into a new session with `git show --stat 92f784fd` so I can see what slipped through.
 
 ---
+
+## 2026-05-05 — Device testing iteration 4 fixes
+
+> Curtis: "the voice recording, transcription, and adding it to the 'Now' tab worked! but there's still TONS of duplicates on the now bundles and the task page. the inbox looks great! but i'd like to see it in list view rather than card/swipe view."
+
+Voice → ActionCard now confirmed working end-to-end (Issue 1 from iter 3 ✓). Two remaining: persistent duplicate cards (different cause than iter 3 caught), and an Inbox UX swap. Both shipped clean on first review.
+
+### #1: Content-level dedupe at projection time  (commit `af1e9993`)
+
+**The actual root cause — not what iter 3 fixed.** Iter 3 made SmartSuggestion ids deterministic and migrated stale ones. But Curtis's most-frequent duplicate source isn't smart suggestions — it's that he's been recording the same intent multiple times. Each recording produces a fresh `Task` (new nanoid id) with the same title. `cardFromTask` projects each separately. Five recordings of "take out the trash" → five distinct Tasks → five projected cards. `dedupeById` couldn't catch these (the ids ARE distinct, the content isn't).
+
+**Fix in `src/services/actionCards.ts`:**
+- ADD `collapseByContent<T extends ActionCard>(cards)` — groups by `${source}|${normalized_title}`, keeps latest `createdAt`. Source data untouched; only the rendered projection collapses.
+- Apply in `projectAllSources` to `fromCaptures` and `fromTasks` (the source types whose ids are per-event nanoids and can therefore have content duplicates). Email and SmartSuggestion projections left alone — those have content-stable ids already.
+- Apply in `mergeStoredOverlays` to the `manualOnly` path so `ctx-` / `manual-` / `bundle-` cards from in-session activity collapse without waiting for the next hydrate. Curtis saying the same memory-augmented thing twice in one session no longer surfaces twice.
+
+**Side effect:** if the user genuinely has two unrelated cards with the same exact title (rare — would have to phrase identically), only the latest surfaces. Acceptable trade for ADHD UX where surfacing duplicate copies is the bigger problem.
+
+**Reviewer flagged one non-blocking note:** title normalization is `lowercase + trim + collapse-whitespace`. Doesn't catch punctuation variants ("Take out trash." vs "Take out trash"). Will iterate if Curtis reports near-duplicates after this build.
+
+### #2: Inbox list view  (commit `27c83b50`)
+
+**Spec:** keep the triage results identical, swap the surface from a single card with swipe gestures to a list with tap-to-expand inline.
+
+**Approach:** rewrote `src/screens/TriageScreen.tsx` end-to-end while preserving every piece of plumbing verbatim:
+- `runTriage` with the iter 1 throttled fan-out (concurrency=2, spacingMs=250) — unchanged.
+- All five action handlers (`reply` → `createDraft`, `calendar_event` → `createEvent`, `task` → `addTask`, `archive` → `archiveMessage`, `snooze` → `scheduleNotificationAsync` with TIME_INTERVAL trigger) — call the same downstream APIs in the same order with the same toasts.
+- Auto-fetch on first focus per session — unchanged.
+- Pull-to-refresh — unchanged.
+- Anti-shame copy — unchanged ("Inbox zero", "Couldn't pull that up", "Couldn't do that").
+
+**New surface:** `FlatList` of `TriageRow` entries sorted by priority (urgent → action_needed → fyi → noise). Each row shows priority badge + sender name + subject (2-line clamp) + summary preview. Tap → animated inline expand revealing full summary + priority reason + suggested-action buttons + a "Mark as read & skip" link. Single-expansion: tapping a different row collapses the previous one.
+
+**Removed:** `SwipeableTriageCard` component and its gesture/transform logic (~300 lines collapsed to a tap-to-expand row). The Inbox now contains zero swipe gestures.
+
+### Review pass
+
+2 general-purpose review subagents in parallel, one per commit. Type and null-byte checks verified once by parent.
+
+| # | Commit     | Verdict | Notes                                                                           |
+|---|------------|---------|---------------------------------------------------------------------------------|
+| 1 | `af1e9993` | SHIP IT | All 7 PASS. Source data verified untouched. Tie-breaker (`>=`) correct. Manual-overlay dedupe verified. |
+| 2 | `27c83b50` | SHIP IT | All 7 PASS. All 5 action types verified parity with prior swipe build. Throttled fan-out preserved. Single-expansion behavior confirmed. |
+
+No fixup commits needed.
+
+### Verification
+
+- `npx tsc --noEmit`: exit 0 after each commit.
+- Null-byte preflight: `app.json` / `package.json` / `eas.json` / `tsconfig.json` all 0 bytes.
+
+### Curtis's next move
+
+Hot-reload Metro (no cold launch needed this round — this iter's dedupe runs at render time, not hydrate). Then:
+
+1. **Now bundles + All tab.** Open both. Stale duplicate cards from previous recordings should be collapsed to a single card per unique title in each section. If Curtis recorded "take out the trash" five times, there's now ONE card with the latest timestamp.
+2. **Same-content session repeat.** While the app is open, hold the mic and say something. Then say it again. Both should still register as separate captures in the source store, but only one card should appear in the feed. (If Curtis wants to see both, he records different phrasings.)
+3. **Inbox list view.** Open Inbox. List of email rows sorted by priority. Tap a row — expands inline with full summary + action buttons. Tap a different row — previous collapses, new one expands. Tap an action button (Reply / Add to Calendar / etc.) — works exactly as before, the email leaves the queue with a confirmation toast. Pull to refresh — fetches + re-triages.
+4. **Punctuation-variant edge case.** If two cards titled "Take out trash" and "Take out trash." both linger after this build, that's the non-blocking nit the reviewer flagged. Worth fixing if it shows up; the fix would be to strip trailing punctuation in the dedupe key.
+
+If anything misbehaves, paste the offending screenshot + the relevant git show into a new session.
+
+---
