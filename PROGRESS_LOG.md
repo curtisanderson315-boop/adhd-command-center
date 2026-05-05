@@ -519,3 +519,43 @@ If anything breaks: capture the Metro console line, paste into a fresh Claude Co
 None. All authorization-gated steps (EAS build, Apple/Google portal changes) were not required.
 
 ---
+
+## 2026-05-04 — Retroactive Phase A–H review pass
+
+Curtis added a "Review Protocol — After Every Phase Commit (MANDATORY)" section to AUTONOMOUS_PROMPT.md after Phases A–H had already shipped. Per the retroactive clause in that section, ran one general-purpose review subagent per phase commit (the available agent inventory has no `code-reviewer` type; protocol explicitly authorizes the `general-purpose` fallback). Each agent ran the 7-check protocol (HOOK PRESERVATION / SPEC COMPLIANCE / TYPE / NULL-BYTE / ANTI-SHAME / ASYNCSTORAGE / STORE HYDRATION) against its assigned commit hash. Type and null-byte checks were verified once by the parent and stamped into each agent's prompt to avoid 8x redundant `tsc` runs.
+
+### Verdicts
+
+| Phase | Commit     | Verdict             | Notes                                                                |
+|-------|------------|---------------------|----------------------------------------------------------------------|
+| A     | `14f5dc8b` | SHIP IT             | All 7 checks pass. Bonus actions (`upsertCards`, `setCardFirstStep`) noted as forward-looking, not regressions. |
+| B     | `540b5afb` | SHIP IT             | All 7. CaptureBar logic preserved verbatim in FloatingMic; legacy notification-route mapping correctly wired. |
+| C     | `78754602` | SHIP IT             | All 7. Trigger-phrase coverage matches spec list; gmail.ts existing exports untouched. |
+| D     | `8ffc2dd5` | SHIP IT             | All 7. Notification handler restored on exit; SVG-less ring is acceptable per the in-line spec deviation. |
+| E     | `a8eca907` | SHIP IT             | All 7. Coach invoked from existing `ADHD_EMAIL_POLL`, not a new TaskManager task; cap, model, and prompt match spec. |
+| F     | `cb65ad1b` | FIX BEFORE ADVANCING | Bundle dedupe missing (members rendered both inside the Bundle hero and again below it). Drive-mode 30s auto-stop guard read `isRecording` from a stale closure. |
+| G     | `68bd88c4` | FIX BEFORE ADVANCING | Anti-shame audit missed one of three sign-in alerts in `SettingsScreen.tsx:251` (`'Sign-in error'` not softened alongside its siblings). |
+| H     | `72f6441a` | SHIP IT             | Doc-only commit; log entry covers every Phase H requirement. |
+
+### Fixes applied (single fixup commit, 3 files / +15 / −3)
+
+- `src/screens/HomeScreen.tsx` — filter `feedCards` by the bundled kinds so 3+ same-kind members aren't double-rendered when their Bundle hero is shown.
+- `src/components/FloatingMic.tsx` — Drive Mode auto-stop now reads `driveModeRef.current` (a ref) instead of the stale `isRecording` state captured at setTimeout creation. The ref is reset by `handleRecordingComplete` on manual tap-to-stop.
+- `src/screens/SettingsScreen.tsx:251` — `'Sign-in error'` → `"Couldn't sign you in"` to match the other two sign-in alerts already updated in Phase G.
+
+### Commits this pass
+
+- `7eea4f6c` docs: add Review Protocol section to AUTONOMOUS_PROMPT.md
+- `7ea7ceeb` fixup: retroactive phase A–H review fixes
+- (this commit) docs: append Review Summary
+
+### Verification after fixes
+
+- `npx tsc --noEmit`: exit 0
+- Working tree clean before this PROGRESS_LOG commit (verified pre-stage)
+
+### Curtis's next move
+
+That's where this session ends. Device smoke tests are Curtis's job. The IPA on disk renders all v2 changes (these were pure JS edits — no native rebuild required).
+
+---
