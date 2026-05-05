@@ -27,3 +27,20 @@ web-build/
 .claude/
 .DS_Store
 *.log
+
+# Transient build logs and diagnostic outputs
+android_setup_log*.txt
+diag_output.txt
+git_status_output.txt
+
+# Prebuild test scripts (iOS prebuild on Windows is impossible — see DEV_LEARNINGS.md)
+prebuild_*.bat
+
+# Dead-end Android setup attempts (project is iOS-only — see CLAUDE.md / DEV_LEARNINGS.md)
+setup_android*.ps1
+setup_android_emulator.bat
+start_emulator.bat
+
+# Local one-off helpers with hardcoded paths / per-session state
+install_skills.bat
+git_status_check.bat
