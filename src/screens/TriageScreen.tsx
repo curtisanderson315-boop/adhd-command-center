@@ -1,8 +1,15 @@
 /**
- * Email Triage Screen — one email at a time. Tap an action. Done.
+ * Inbox (Email Triage) — list view.
  *
- * Auto-fetches on focus when a Google account + Claude key are connected.
- * Swipe left to archive, right to dismiss as FYI.
+ * Each unread + triaged email is one row. Tap a row to expand it inline:
+ * the summary, priority reason, and the AI's suggested actions are
+ * revealed. Action buttons (reply / calendar / task / archive / snooze)
+ * fire the existing routing flow.
+ *
+ * Replaces the prior single-card-with-swipe UX (Curtis preferred a list
+ * after iter 3 device testing). The action plumbing — runTriage, the
+ * throttled triage fan-out, action-handler logic, completeAction — is
+ * preserved verbatim from that build.
  */
 
 import React, { useEffect, useState, useCallback, useRef } from 'react';
@@ -16,19 +23,15 @@ import {
   ActivityIndicator,
   Alert,
   RefreshControl,
-  Dimensions,
+  FlatList,
+  Pressable,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
-import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
   withTiming,
-  withSpring,
-  runOnJS,
   Easing,
-  interpolate,
-  Extrapolation,
 } from 'react-native-reanimated';
 import * as Notifications from 'expo-notifications';
 import { useAppStore } from '../store';
@@ -46,8 +49,7 @@ import { createEvent } from '../services/calendar';
 import { getSavedEmail, isSignedIn } from '../services/auth';
 import type { TriagedEmail, TriageSuggestedAction } from '../types';
 
-const SCREEN_WIDTH = Dimensions.get('window').width;
-const SWIPE_THRESHOLD = 110;
+// ─── Action visual mapping (compact button colors) ────────────────────────
 
 const ACTION_BG: Record<string, string> = {
   reply: '#1e2a4a',
@@ -65,6 +67,13 @@ const ACTION_COLOR: Record<string, string> = {
   snooze: colors.textMuted,
 };
 
+const PRIORITY_ORDER: Record<TriagedEmail['priority'], number> = {
+  urgent: 0,
+  action_needed: 1,
+  fyi: 2,
+  noise: 3,
+};
+
 export function TriageScreen() {
   const {
     triageQueue,
@@ -78,16 +87,17 @@ export function TriageScreen() {
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasAutoFetched = useRef(false);
-
-  const current = triageQueue[0] ?? null;
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
     if (toastTimer.current) clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(null), 2200);
   }, []);
+
+  // ── Triage fetch ────────────────────────────────────────────────────────
 
   const runTriage = useCallback(
     async ({ silent = false }: { silent?: boolean } = {}) => {
@@ -121,17 +131,15 @@ export function TriageScreen() {
           setLastTriageAt(Date.now());
           return;
         }
-        // Throttled fan-out: Anthropic's concurrent-connection limit kills
-        // a naive Promise.all over 10+ unread emails (was hitting 429
-        // "Number of concurrent connections has exceeded your rate limit").
+        // Throttled fan-out — Anthropic's concurrent-connection limit
+        // kills a naive Promise.all over 10+ unread emails. (Iter 1.)
         const triagedRaw = await runWithConcurrency(
           rawEmails,
           (e) => triageEmail(e, settings.anthropicKey),
           { concurrency: 2, spacingMs: 250, label: 'TriageScreen.triage' }
         );
         const triaged = triagedRaw.filter((t): t is NonNullable<typeof t> => t !== null);
-        const order = { urgent: 0, action_needed: 1, fyi: 2, noise: 3 };
-        triaged.sort((a, b) => order[a.priority] - order[b.priority]);
+        triaged.sort((a, b) => PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority]);
         setTriageQueue(triaged);
         setLastTriageAt(Date.now());
       } catch (e: any) {
@@ -164,14 +172,17 @@ export function TriageScreen() {
     };
   }, []);
 
-  // ── Action handlers ──────────────────────────────────────────────────
+  // ── Action handlers ─────────────────────────────────────────────────────
+  // Same plumbing the swipe build used. Each handler ends in
+  // completeAction(emailId, message), which removes from queue + toasts.
 
   const completeAction = useCallback(
     (emailId: string, message: string) => {
       removeFromTriage(emailId);
+      if (expandedId === emailId) setExpandedId(null);
       showToast(message);
     },
-    [removeFromTriage, showToast]
+    [removeFromTriage, showToast, expandedId]
   );
 
   const handleAction = async (email: TriagedEmail, action: TriageSuggestedAction) => {
@@ -246,45 +257,44 @@ export function TriageScreen() {
     }
   };
 
-  const handleArchiveSwipe = async (email: TriagedEmail) => {
-    try {
-      await archiveMessage(email.id);
-    } catch {
-      // Already removed locally; surface nothing if API hiccups
-    }
-    completeAction(email.id, '🗑 Archived');
-  };
-
-  const handleDismissSwipe = async (email: TriagedEmail) => {
+  // Quick row-level dismiss (no AI action) — equivalent to "mark as read".
+  const handleQuickDismiss = async (email: TriagedEmail) => {
     try {
       await markAsRead(email.id);
     } catch {
-      /* noop */
+      /* noop — local removal still proceeds */
     }
     completeAction(email.id, '✓ Marked as read');
   };
 
-  // ── Render ───────────────────────────────────────────────────────────
+  // ── Render ──────────────────────────────────────────────────────────────
 
-  return (
-    <SafeAreaView style={styles.container}>
-      <View style={styles.header}>
-        <Text style={styles.headerTitle}>Email Triage</Text>
-        {lastTriageAt ? (
-          <Text style={styles.headerSub}>
-            Last checked {relativeTime(new Date(lastTriageAt).toISOString())}
-          </Text>
-        ) : (
-          <Text style={styles.headerSub}>Pull down to check your inbox.</Text>
-        )}
-      </View>
+  const headerSub = lastTriageAt
+    ? `Last checked ${relativeTime(new Date(lastTriageAt).toISOString())}`
+    : 'Pull down to check your inbox.';
 
-      {loading ? (
+  if (loading) {
+    return (
+      <SafeAreaView style={styles.container}>
+        <View style={styles.header}>
+          <Text style={styles.headerTitle}>Inbox</Text>
+          <Text style={styles.headerSub}>{headerSub}</Text>
+        </View>
         <View style={styles.center}>
           <ActivityIndicator size="large" color={colors.purple} />
           <Text style={styles.loadingText}>Checking your inbox...</Text>
         </View>
-      ) : triageQueue.length === 0 ? (
+      </SafeAreaView>
+    );
+  }
+
+  if (triageQueue.length === 0) {
+    return (
+      <SafeAreaView style={styles.container}>
+        <View style={styles.header}>
+          <Text style={styles.headerTitle}>Inbox</Text>
+          <Text style={styles.headerSub}>{headerSub}</Text>
+        </View>
         <ScrollView
           contentContainerStyle={styles.center}
           refreshControl={
@@ -304,23 +314,43 @@ export function TriageScreen() {
             <Text style={styles.refreshBtnText}>Check now</Text>
           </TouchableOpacity>
         </ScrollView>
-      ) : current ? (
-        <SwipeableTriageCard
-          key={current.id}
-          email={current}
-          queueSize={triageQueue.length}
-          onSwipeArchive={() => handleArchiveSwipe(current)}
-          onSwipeDismiss={() => handleDismissSwipe(current)}
-          onAction={(action) => handleAction(current, action)}
-          onSkip={() => completeAction(current.id, 'Skipped')}
-        />
-      ) : null}
+      </SafeAreaView>
+    );
+  }
 
-      {!loading && triageQueue.length > 0 && (
-        <TouchableOpacity style={styles.fab} onPress={() => void runTriage()}>
-          <Text style={styles.fabText}>↺</Text>
-        </TouchableOpacity>
-      )}
+  return (
+    <SafeAreaView style={styles.container}>
+      <View style={styles.header}>
+        <Text style={styles.headerTitle}>Inbox</Text>
+        <Text style={styles.headerSub}>
+          {headerSub} · {triageQueue.length} to review
+        </Text>
+      </View>
+
+      <FlatList
+        data={triageQueue}
+        keyExtractor={(e) => e.id}
+        contentContainerStyle={styles.list}
+        renderItem={({ item }) => (
+          <TriageRow
+            email={item}
+            expanded={expandedId === item.id}
+            onToggle={() =>
+              setExpandedId((cur) => (cur === item.id ? null : item.id))
+            }
+            onAction={(a) => handleAction(item, a)}
+            onDismiss={() => handleQuickDismiss(item)}
+          />
+        )}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => void runTriage({ silent: true })}
+            tintColor={colors.purple}
+          />
+        }
+        ListFooterComponent={<View style={{ height: 80 }} />}
+      />
 
       {toast ? (
         <View style={styles.toast} pointerEvents="none">
@@ -331,144 +361,101 @@ export function TriageScreen() {
   );
 }
 
-// ── Swipeable card ──────────────────────────────────────────────────────
+// ─── One row: compact by default, expands inline ──────────────────────────
 
-interface CardProps {
+interface RowProps {
   email: TriagedEmail;
-  queueSize: number;
-  onSwipeArchive: () => void;
-  onSwipeDismiss: () => void;
-  onAction: (action: TriageSuggestedAction) => void;
-  onSkip: () => void;
+  expanded: boolean;
+  onToggle: () => void;
+  onAction: (a: TriageSuggestedAction) => void;
+  onDismiss: () => void;
 }
 
-function SwipeableTriageCard({
-  email,
-  queueSize,
-  onSwipeArchive,
-  onSwipeDismiss,
-  onAction,
-  onSkip,
-}: CardProps) {
-  const translateX = useSharedValue(0);
+function TriageRow({ email, expanded, onToggle, onAction, onDismiss }: RowProps) {
+  const expandValue = useSharedValue(0);
 
-  const pan = Gesture.Pan()
-    .activeOffsetX([-20, 20])
-    .onUpdate((e) => {
-      translateX.value = e.translationX;
-    })
-    .onEnd((e) => {
-      if (e.translationX < -SWIPE_THRESHOLD) {
-        translateX.value = withTiming(-SCREEN_WIDTH, { duration: 220 }, () => {
-          runOnJS(onSwipeArchive)();
-        });
-      } else if (e.translationX > SWIPE_THRESHOLD) {
-        translateX.value = withTiming(SCREEN_WIDTH, { duration: 220 }, () => {
-          runOnJS(onSwipeDismiss)();
-        });
-      } else {
-        translateX.value = withSpring(0, { damping: 20 });
-      }
+  useEffect(() => {
+    expandValue.value = withTiming(expanded ? 1 : 0, {
+      duration: 220,
+      easing: Easing.out(Easing.cubic),
     });
+  }, [expanded]);
 
-  const cardStyle = useAnimatedStyle(() => ({
-    transform: [
-      { translateX: translateX.value },
-      {
-        rotate: `${interpolate(
-          translateX.value,
-          [-SCREEN_WIDTH, 0, SCREEN_WIDTH],
-          [-8, 0, 8],
-          Extrapolation.CLAMP
-        )}deg`,
-      },
-    ],
+  const expandStyle = useAnimatedStyle(() => ({
+    opacity: expandValue.value,
+    maxHeight: expandValue.value * 700,
   }));
 
-  const archiveHintStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(
-      translateX.value,
-      [-SWIPE_THRESHOLD, 0],
-      [1, 0],
-      Extrapolation.CLAMP
-    ),
-  }));
-
-  const dismissHintStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(
-      translateX.value,
-      [0, SWIPE_THRESHOLD],
-      [0, 1],
-      Extrapolation.CLAMP
-    ),
-  }));
+  const fromName = prettyFrom(email.from);
 
   return (
-    <View style={styles.cardLayer}>
-      <Animated.View style={[styles.swipeHint, styles.swipeHintLeft, archiveHintStyle]}>
-        <Text style={styles.swipeHintIcon}>🗑</Text>
-        <Text style={styles.swipeHintText}>Archive</Text>
-      </Animated.View>
-      <Animated.View style={[styles.swipeHint, styles.swipeHintRight, dismissHintStyle]}>
-        <Text style={styles.swipeHintIcon}>✓</Text>
-        <Text style={styles.swipeHintText}>Got it</Text>
-      </Animated.View>
-
-      <GestureDetector gesture={pan}>
-        <Animated.View style={[styles.cardWrap, cardStyle]}>
-          <ScrollView contentContainerStyle={styles.card}>
-            <Text style={styles.progress}>1 of {queueSize}</Text>
+    <View style={styles.row}>
+      <Pressable onPress={onToggle} style={styles.rowHeader} hitSlop={4}>
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <View style={styles.rowMetaRow}>
             <PriorityBadge priority={email.priority} />
-
-            <Text style={styles.subject} numberOfLines={3}>
-              {email.subject}
+            <Text style={styles.rowFrom} numberOfLines={1}>
+              {fromName}
             </Text>
-            <Text style={styles.from}>{email.from}</Text>
-            <Text style={styles.time}>{relativeTime(email.receivedAt)}</Text>
+          </View>
+          <Text style={styles.rowSubject} numberOfLines={2}>
+            {email.subject}
+          </Text>
+          {!expanded ? (
+            <Text style={styles.rowSummary} numberOfLines={2}>
+              {email.summary}
+            </Text>
+          ) : null}
+        </View>
+        <Text style={styles.chev}>{expanded ? '▾' : '▸'}</Text>
+      </Pressable>
 
-            <View style={styles.summaryBox}>
-              <Text style={styles.summaryLabel}>WHAT IS THIS</Text>
-              <Text style={styles.summaryText}>{email.summary}</Text>
-              {email.priorityReason ? (
-                <Text style={styles.reasonText}>↑ {email.priorityReason}</Text>
-              ) : null}
-            </View>
+      <Animated.View
+        style={[styles.expandBlock, expandStyle]}
+        pointerEvents={expanded ? 'auto' : 'none'}
+      >
+        <Text style={styles.expandedSummary}>{email.summary}</Text>
+        {email.priorityReason ? (
+          <Text style={styles.priorityReason}>Why: {email.priorityReason}</Text>
+        ) : null}
 
-            <Text style={styles.actionsLabel}>WHAT TO DO</Text>
-            <View style={styles.actions}>
-              {email.suggestedActions.map((action, i) => (
-                <TouchableOpacity
-                  key={i}
+        {email.suggestedActions.length > 0 ? (
+          <View style={styles.actionsRow}>
+            {email.suggestedActions.slice(0, 3).map((a, idx) => (
+              <TouchableOpacity
+                key={`${email.id}-action-${idx}`}
+                style={[
+                  styles.actionBtn,
+                  { backgroundColor: ACTION_BG[a.actionType] ?? '#1e1e2e' },
+                ]}
+                onPress={() => onAction(a)}
+              >
+                <Text
                   style={[
-                    styles.actionBtn,
-                    { backgroundColor: ACTION_BG[action.actionType] ?? '#1e1e2e' },
+                    styles.actionBtnText,
+                    { color: ACTION_COLOR[a.actionType] ?? colors.textPrimary },
                   ]}
-                  onPress={() => onAction(action)}
+                  numberOfLines={1}
                 >
-                  <Text
-                    style={[
-                      styles.actionLabel,
-                      { color: ACTION_COLOR[action.actionType] ?? colors.textPrimary },
-                    ]}
-                  >
-                    {action.label}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
+                  {a.label}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        ) : null}
 
-            <Text style={styles.swipeFooter}>
-              Swipe left to archive · right to dismiss
-            </Text>
-
-            <TouchableOpacity style={styles.skipBtn} onPress={onSkip}>
-              <Text style={styles.skipText}>Skip for now</Text>
-            </TouchableOpacity>
-          </ScrollView>
-        </Animated.View>
-      </GestureDetector>
+        <TouchableOpacity onPress={onDismiss} style={styles.dismissLink} hitSlop={8}>
+          <Text style={styles.dismissText}>Mark as read & skip</Text>
+        </TouchableOpacity>
+      </Animated.View>
     </View>
   );
+}
+
+function prettyFrom(from: string): string {
+  // "Sarah Smith <sarah@example.com>" → "Sarah Smith"
+  const m = from.match(/^"?([^"<]+?)"?\s*<.+>$/);
+  return (m?.[1] ?? from).trim();
 }
 
 const styles = StyleSheet.create({
@@ -476,119 +463,135 @@ const styles = StyleSheet.create({
   header: {
     paddingHorizontal: spacing.lg,
     paddingTop: spacing.lg,
-    paddingBottom: spacing.md,
+    paddingBottom: spacing.sm,
   },
   headerTitle: typography.h1,
   headerSub: { ...typography.bodyMuted, marginTop: 4 },
+  list: {
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.sm,
+  },
   center: {
     flexGrow: 1,
     alignItems: 'center',
     justifyContent: 'center',
     gap: spacing.md,
-    padding: spacing.xl,
+    paddingHorizontal: spacing.xl,
   },
-  loadingText: { ...typography.body, color: colors.textSecondary, marginTop: spacing.md },
+  loadingText: { ...typography.bodyMuted, marginTop: spacing.md },
   emptyIcon: { fontSize: 52 },
   emptyTitle: typography.h2,
   emptySub: { ...typography.bodyMuted, textAlign: 'center' },
   refreshBtn: {
-    marginTop: spacing.md,
     backgroundColor: colors.purple,
-    paddingHorizontal: spacing.xl,
-    paddingVertical: spacing.md,
-    borderRadius: radius.full,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: 12,
+    borderRadius: radius.md,
+    marginTop: spacing.sm,
   },
-  refreshBtnText: { color: '#fff', fontWeight: '700', fontSize: 16 },
-
-  cardLayer: { flex: 1, position: 'relative' },
-  cardWrap: { flex: 1 },
-  card: {
-    padding: spacing.lg,
-    gap: spacing.md,
-    paddingBottom: spacing.xxl,
-  },
-  swipeHint: {
-    position: 'absolute',
-    top: '40%',
-    alignItems: 'center',
-    gap: 4,
-    zIndex: 0,
-  },
-  swipeHintLeft: { right: 32 },
-  swipeHintRight: { left: 32 },
-  swipeHintIcon: { fontSize: 36 },
-  swipeHintText: {
+  refreshBtnText: {
+    color: '#fff',
     fontSize: 16,
     fontWeight: '700',
-    color: colors.textSecondary,
   },
-  progress: {
-    ...typography.caption,
-    color: colors.textMuted,
-    alignSelf: 'flex-end',
-  },
-  subject: {
-    fontSize: 22,
-    fontWeight: '700',
-    color: colors.textPrimary,
-    lineHeight: 28,
-    marginTop: spacing.xs,
-  },
-  from: { ...typography.bodyMuted },
-  time: { ...typography.caption },
-  summaryBox: {
+
+  // Row container
+  row: {
     backgroundColor: colors.bgCard,
+    borderColor: colors.border,
+    borderWidth: 1,
     borderRadius: radius.lg,
     padding: spacing.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    gap: spacing.xs,
+    marginBottom: spacing.sm,
   },
-  summaryLabel: typography.label,
-  summaryText: {
-    ...typography.body,
+  rowHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.sm,
+  },
+  rowMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginBottom: 4,
+    flexWrap: 'wrap',
+  },
+  rowFrom: {
+    color: colors.textSecondary,
+    fontSize: 13,
+    fontWeight: '600',
+    flex: 1,
+    minWidth: 0,
+  },
+  rowSubject: {
+    color: colors.textPrimary,
+    fontSize: 16,
+    fontWeight: '700',
+    lineHeight: 22,
+    marginBottom: 4,
+  },
+  rowSummary: {
+    ...typography.bodyMuted,
+    fontSize: 14,
+    lineHeight: 20,
+    fontStyle: 'italic',
+  },
+  chev: {
+    color: colors.textMuted,
+    fontSize: 18,
+    fontWeight: '700',
+    paddingTop: 2,
+    paddingHorizontal: 4,
+  },
+
+  // Expanded block
+  expandBlock: {
+    overflow: 'hidden',
+    marginTop: spacing.sm,
+    gap: spacing.sm,
+  },
+  expandedSummary: {
+    color: colors.textPrimary,
+    fontSize: 15,
     lineHeight: 22,
   },
-  reasonText: {
-    ...typography.caption,
-    color: colors.actionNeeded,
-    marginTop: spacing.xs,
+  priorityReason: {
+    color: colors.textSecondary,
+    fontSize: 13,
+    fontStyle: 'italic',
   },
-  actionsLabel: { ...typography.label, marginTop: spacing.sm },
-  actions: { gap: spacing.sm },
+  actionsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    marginTop: 4,
+  },
   actionBtn: {
-    paddingVertical: spacing.md,
-    paddingHorizontal: spacing.lg,
+    paddingVertical: 10,
+    paddingHorizontal: spacing.md,
     borderRadius: radius.md,
+    minWidth: 100,
     alignItems: 'center',
-    minHeight: 52,
-    justifyContent: 'center',
   },
-  actionLabel: { fontWeight: '700', fontSize: 16 },
-  swipeFooter: {
-    ...typography.caption,
-    textAlign: 'center',
-    marginTop: spacing.md,
+  actionBtnText: {
+    fontSize: 14,
+    fontWeight: '700',
   },
-  skipBtn: { alignItems: 'center', paddingVertical: spacing.md },
-  skipText: { color: colors.textMuted, fontSize: 16, fontWeight: '600' },
-  fab: {
-    position: 'absolute',
-    bottom: 32,
-    right: 24,
-    width: 52,
-    height: 52,
-    borderRadius: 26,
-    backgroundColor: colors.bgCard,
-    borderWidth: 1,
-    borderColor: colors.border,
-    alignItems: 'center',
-    justifyContent: 'center',
+  dismissLink: {
+    alignSelf: 'flex-start',
+    paddingVertical: 6,
   },
-  fabText: { color: colors.textSecondary, fontSize: 22 },
+  dismissText: {
+    color: colors.textSecondary,
+    fontSize: 14,
+    fontWeight: '600',
+    textDecorationLine: 'underline',
+  },
+
+  // Toast
   toast: {
     position: 'absolute',
-    bottom: 100,
+    bottom: 110,
     alignSelf: 'center',
     backgroundColor: colors.bgCard,
     borderColor: colors.border,
