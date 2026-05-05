@@ -2,7 +2,7 @@
 > This file is read automatically at the start of every Claude session in this directory.
 > It defines the agent persona, all project rules, workflows, and autonomous decision-making protocols.
 > DO NOT DELETE OR TRUNCATE THIS FILE.
-> Last updated: 2026-05-04 (v4 -- Claude Code as primary dev environment)
+> Last updated: 2026-05-04 (v5 -- Action Card pivot, Whisper live)
 
 ---
 
@@ -306,10 +306,209 @@ npx expo start --clear --tunnel
 
 ### Known Limitations (by design)
 
-- **Audio transcription stubbed** -- `transcribeAudio()` returns `null`. UI falls through to text input. Swap point: `transcribeAudio()` in `src/services/ai.ts`.
+- **Audio transcription LIVE (OpenAI Whisper)** -- voice -> text works end-to-end. Treat the audio pipeline as solved. Do not modify `transcribeAudio()` unless it's actually broken.
 - **iOS controls background fetch timing** -- iOS enforces 15-min minimum interval.
 - **No SMS reading** -- iOS blocks this completely. PIE uses email + calendar only.
 - **Amazon: no direct add-to-cart** -- App opens the Amazon search results page for the product. User taps Add to Cart once on Amazon. No Amazon Associate account or API credentials required.
+
+---
+
+## Design Vision v2: The Action Card Architecture (CURRENT BUILD)
+
+> **This section supersedes the PIE spec below.** PIE is still the multi-document
+> reasoning engine, but its `SmartSuggestion` output is now wrapped as an
+> ActionCard in the unified UI. The v2 build also adds: Memory-Augmented Action,
+> Now Mode, Focus Mode, Drive Mode, the Activation Coach, the Receipt Index,
+> Smart Bundling, and an anti-shame copy audit.
+
+### The mission
+
+We are not building a to-do app. We are building a prosthetic executive function for an ADHD brain. Every design decision serves three rules:
+
+1. **Capture is zero-friction.** A thought becomes a structured action without the user looking at the screen.
+2. **Action is one tap.** From "I should do this" to "this is done" must compress to a single button press whenever physically possible.
+3. **The system carries the context.** Every task knows where it came from, what's related to it, and what the literal next physical step is -- so the user never has to remember.
+
+### The hero flow (the bar every feature is measured against)
+
+> User (driving): "Hey Siri, ARIA brain dump. I need to buy a replacement piece for the trashcan. I bought it before, there's a receipt in my email."
+>
+> *(2 seconds of processing)*
+>
+> A card appears at the top of the Now Feed:
+>
+> > **Reorder Simplehuman CW1834 hinge**
+> > *Bought $12.99 from Amazon on Aug 12, 2025. Megan asked for this last week.*
+> > [ Reorder on Amazon -> ]
+>
+> Tapping the button deep-links straight to the product page. User taps Buy Now. Done in 8 seconds total.
+
+If a feature does not push toward this flow, it does not ship.
+
+### The ActionCard primitive
+
+Every actionable thing -- voice capture, email triage, smart suggestion, overdue task, calendar prep -- renders as the same component. Source-specific types (`CapturedAction`, `TriagedEmail`, `SmartSuggestion`, `Task`) remain. ActionCard is the unified surface layer; converters live in `src/services/actionCards.ts`.
+
+```typescript
+export type ActionUrgency = 'now' | 'today' | 'this_week' | 'someday';
+
+export type ActionPayload =
+  | { kind: 'open_url'; url: string; label: string }
+  | { kind: 'create_calendar'; event: { title: string; date: string | null; durationMinutes: number; notes?: string }; label: string }
+  | { kind: 'create_draft'; emailId: string; subject: string; body: string; label: string }
+  | { kind: 'reorder_amazon'; asin?: string; query: string; label: string }
+  | { kind: 'add_task'; bucket: 'today' | 'upcoming' | 'someday'; label: string }
+  | { kind: 'mark_done'; label: string }
+  | { kind: 'snooze'; until: string; label: string };
+
+export interface ActionCard {
+  id: string;
+  source: 'voice' | 'email' | 'calendar' | 'smart_scan' | 'manual';
+  title: string;                           // imperative, < 60 chars
+  context: string;                         // one sentence with provenance
+  urgency: ActionUrgency;
+  primaryAction: ActionPayload;
+  secondaryActions?: ActionPayload[];
+  firstStep?: string | null;
+  relatedEmailIds?: string[];
+  createdAt: string;
+  status: 'pending' | 'in_progress' | 'done' | 'dismissed' | 'snoozed';
+  snoozeUntil?: string | null;
+  completedAt?: string | null;
+}
+```
+
+### Tab structure (5 -> 4)
+
+The Suggestions tab is removed in v2. Its content is just ActionCards in the Now Feed -- two surfaces showing the same thing was the cognitive load we're killing.
+
+| Tab          | Replaces             | Purpose                                          |
+|--------------|----------------------|--------------------------------------------------|
+| **Now**      | Home + Suggestions   | Hero card + ActionCard feed for today            |
+| **All**      | Tasks                | Filterable list of every open ActionCard         |
+| **Inbox**    | Triage               | Email triage; outputs ActionCards into Now       |
+| **Settings** | Settings             | unchanged                                        |
+
+Capture moves from screen-local to global: a `<FloatingMic />` component renders at the App.tsx level so the mic is one tap from any tab.
+
+### Now Mode (default home view)
+
+- **Hero Now Card** at the top: ~60% viewport, the single highest-priority action right now.
+- **Compact ActionCard stack** below: today's queue. Swipe right snoozes 1hr. Swipe left dismisses.
+- **Slim greeting line** above hero: "Tuesday 2:47pm -- 6 things on your plate"
+- Pull-to-refresh triggers a fresh smart scan.
+
+### Memory-Augmented Action
+
+When voice transcript matches a context-hint regex (trigger phrases: `"again"`, `"bought it before"`, `"like last time"`, `"the receipt"`, `"that thing I ordered"`, `"reorder"`, `"the dentist"`, `"the recruiter from"`, `"same as last time"`), the AI does NOT create a generic task. Instead the new service `src/services/contextMiner.ts` runs:
+
+1. Generate a Gmail search query from the utterance.
+2. Run the search via gmail.ts.
+3. Read the top 3-5 matching threads.
+4. Extract structured data (product + ASIN, person + email, event + address, etc.).
+5. Build an ActionCard with a deep-link primaryAction.
+
+Cache the last 50 emails locally under `@adhd:emailCache` for sub-3-second lookups. Pre-cache on app open if stale (>30 min).
+
+### Focus Mode
+
+When the user taps "Start" on an ActionCard, transition to a full-bleed black overlay:
+- Task title at top
+- The literal next physical step in the middle
+- 25-min Pomodoro timer ring around a centered DONE button
+- Notifications silenced for the session (`Notifications.setNotificationHandler` returns shouldShowAlert=false)
+- Built as a modal overlay (`src/components/FocusMode.tsx`), not a separate route.
+
+### Drive Mode
+
+Triggered by Siri shortcut "ARIA brain dump":
+- Recording starts immediately, no UI.
+- Whisper transcribes -> Claude splits into individual ActionCards.
+- TTS confirmation via `expo-speech`: "Got 4 things. First..." then enumerates.
+- Cards appear in the Now Feed when the user opens the phone.
+- Handled in `src/services/siri.ts` via a new `drive_brain_dump` shortcut action.
+
+### First-Physical-Step generator (Activation Coach)
+
+`src/services/activationCoach.ts` runs daily over pending ActionCards >24h old without a `firstStep`. The AI returns one short sentence -- the literal physical action that breaks the activation barrier:
+- "Schedule dentist" -> "Pick up your phone and call (415) 555-0234."
+- "Do laundry" -> "Carry the basket to the washer."
+- "Reply to Sarah" -> "Open this draft."
+
+Surface the firstStep as an italic line below the context on the ActionCard.
+
+### Receipt / Order Memory Index
+
+Background job in background.ts scans Gmail for order confirmations (Amazon, Chewy, Walmart, Target, Instacart, generic `*@orders.*`, subjects starting with "Your order" or "Order confirmation") and persists a local index under `@adhd:purchases`:
+
+```typescript
+export interface PurchaseRecord {
+  vendor: string;
+  productName: string;
+  asin?: string;
+  price?: string;
+  orderedAt: string;
+  emailId: string;
+  rawSubject: string;
+}
+```
+
+Re-scan weekly. The contextMiner consults this index FIRST before live Gmail search.
+
+### Smart Bundling
+
+When the AI detects a cluster (3+ pending cards with the same `primaryAction.kind`), prepend a Bundle hero card:
+
+> **You have 4 things to buy. Want to knock them out?**
+> [ Open Bundle -> ]
+
+Tapping opens a focused stack -- one ActionCard at a time with a Next button. Same UI primitive as Focus Mode, stepping through cards instead of through steps within one card.
+
+### Anti-shame copy rules (non-negotiable)
+
+ADHD shame language is a relapse trigger. Audit every user-facing string in the codebase against this table:
+
+| Don't say                       | Do say                                              |
+|---------------------------------|-----------------------------------------------------|
+| "Overdue 5 days"                | "Still on your list"                                |
+| "URGENT" badge                  | "Worth doing today"                                 |
+| "You missed this"               | "Picking back up where you left off"                |
+| "Failed tasks"                  | "Things to revisit"                                 |
+| Empty state "No tasks"          | "Caught up. Nothing pulling at you right now."      |
+| Error "Failed to scan"          | "Couldn't pull that up. Pull to refresh."           |
+| Notification "Don't forget!"    | "Quick -- want to knock this out?"                  |
+
+### File-structure additions for v2
+
+```
+src/
+|- components/
+|   |- ActionCard.tsx        <- NEW: unified card component (hero + compact modes)
+|   |- FloatingMic.tsx       <- NEW: persistent FAB; absorbs CaptureBar logic
+|   |- FocusMode.tsx         <- NEW: full-bleed overlay with 25-min timer
+|- services/
+|   |- actionCards.ts        <- NEW: source-type -> ActionCard converters
+|   |- contextMiner.ts       <- NEW: memory-augmented action engine
+|   |- activationCoach.ts    <- NEW: first-physical-step generator
+|- screens/
+|   |- HomeScreen.tsx        <- REBUILT as NowFeed
+|   |- (SuggestionsScreen.tsx removed -- merged into NowFeed)
+```
+
+### Build phases (canonical order -- match AUTONOMOUS_PROMPT.md)
+
+A. Types + ActionCard primitive + converters + store wiring (~1 hr)
+B. Now Feed UI + FloatingMic + 4-tab navigation (~2 hrs)
+C. Memory-Augmented Action (contextMiner + email cache + voice routing) (~2 hrs)
+D. Focus Mode (~1.5 hrs)
+E. Activation Coach (~1 hr)
+F. Receipt Index + Drive Mode + Bundling (~1.5 hrs)
+G. Anti-shame copy audit (~30 min)
+H. Verify (tsc + null-byte preflight) + ship (~30 min)
+
+Phases A-D are mandatory. Skip priority if blocked: G first, then F bundling, then F receipt index, then E.
+
+The entire v2 build is JS/TypeScript only EXCEPT `expo-speech` (Phase F Drive Mode TTS), which is native and forces one EAS build. If Phase F is descoped, ship through Metro on the existing dev IPA -- no build needed.
 
 ---
 
