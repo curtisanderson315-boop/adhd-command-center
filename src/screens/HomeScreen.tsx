@@ -26,6 +26,7 @@ import {
 import { useFocusEffect } from '@react-navigation/native';
 import { useAppStore } from '../store';
 import { ActionCard } from '../components/ActionCard';
+import { FocusMode } from '../components/FocusMode';
 import { colors, spacing, typography, radius } from '../theme';
 import {
   compareCards,
@@ -68,6 +69,7 @@ export function HomeScreen() {
 
   const [scanning, setScanning] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [focusCard, setFocusCard] = useState<ActionCardModel | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasAutoScanned = useRef(false);
 
@@ -349,6 +351,7 @@ export function HomeScreen() {
                 mode="hero"
                 onPrimaryAction={handlePrimary}
                 onSecondaryAction={handleSecondary}
+                onStartFocus={(c) => setFocusCard(c)}
               />
             ) : null
           }
@@ -358,6 +361,7 @@ export function HomeScreen() {
               mode="compact"
               onPrimaryAction={handlePrimary}
               onSecondaryAction={handleSecondary}
+              onStartFocus={(c) => setFocusCard(c)}
               onDismiss={dismissAcrossSources}
               onSnooze={snoozeAcrossSources}
             />
@@ -372,6 +376,13 @@ export function HomeScreen() {
           <Text style={styles.toastText}>{toast}</Text>
         </View>
       ) : null}
+
+      <FocusMode
+        visible={focusCard !== null}
+        card={focusCard}
+        onDone={(c) => void markDoneAcrossSources(c)}
+        onClose={() => setFocusCard(null)}
+      />
     </SafeAreaView>
   );
 }
