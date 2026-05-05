@@ -651,3 +651,76 @@ Reload Metro on the device. Smoke test in this order:
 If anything still misbehaves, paste the Metro log line (look for `[FloatingMic][voice]`, `[TriageScreen.triage]`, `[BackgroundPoll.triage]`, or `[UndoBanner]`) into a new session.
 
 ---
+
+## 2026-05-05 — Device testing iteration 2 fixes
+
+Curtis took the iteration 1 build to device, surfaced two real bugs and made one design call after seeing the feed in motion. All three landed in three sequential commits, all three SHIP IT on first review.
+
+### Bug A: Routed voice captures hidden from Now Feed  (commit `b01b6930`)
+
+**Symptom:** Curtis recorded a voice note. Whisper transcribed. Claude clarification TTS spoke. The action fired — a real Gmail draft appeared in his actual Drafts folder. **No ActionCard appeared in the Now Feed.** The voice → side-effect path was working; the voice → card-render path was broken.
+
+**Root cause:** `cardFromCapturedAction.statusFromCapture` mapped source.status `'routed'` → ActionCardStatus `'done'`, and `NowFeed.visibleCards` filters out anything that isn't `'pending'`. The card was being projected, just immediately filtered.
+
+**Fix in `src/services/actionCards.ts`:**
+- `statusFromCapture`: routed captures stay `'pending'` in the projection.
+- When `source.status === 'routed'`, override `primaryAction` to `{ kind: 'mark_done', label: 'Got it' }` so tapping the button cannot re-execute the side effect (no double-Gmail-draft, no double-event).
+- Replaced `urgencyFromPriority(p)` with `urgencyFromCapture(a)`. New rule: voice captures default to `'today'` unless the AI extracted an explicit future date — then proximity-derived (<24h: today, <7d: this_week, else someday). Matches the design call's "today is the right default for an ADHD brain capturing now" rule.
+- Removed the now-unused `urgencyFromPriority` helper.
+
+### Bug B: Duplicate cards everywhere  (commit `42321125`)
+
+**Root cause:** `normalizeSuggestion` in `smartScan.ts` minted a fresh `nanoid` for every parsed item, so the same logical scan result produced a different `SmartSuggestion.id` on every 15-minute background scan. `setSuggestions`' merge-by-id silently appended instead of upserting, and `cardFromSmartSuggestion` faithfully projected each duplicate as its own ActionCard. Other converters (voice / task / email) were already keyed off stable source ids and not implicated.
+
+**Fix:**
+- `src/services/utils.ts`: ADD `stableHash(input)` — djb2 variant, 8-char hex output, pure, no deps.
+- `src/services/smartScan.ts`: `normalizeSuggestion` now sets `id: stableHash(suggestionDedupKey(type, title, sourceEmailId))`. Same content → same id, every run. The exported `dedupKey` widens to `Pick<SmartSuggestion, 'type' | 'title' | 'sourceEmailId'>` and delegates to `suggestionDedupKey` — id minting and the existing background.ts merge step agree on what counts as a duplicate. Dropped the `'smart-'` prefix from `SmartSuggestion.id`; that namespace belongs to `cardFromSmartSuggestion` (`smart-${s.id}`).
+- `src/store/index.ts`: ADD `dedupeById<T>` helper that collapses entries sharing an id, keeping latest `createdAt`. `hydrate()` runs the dedupe pass over both `actionCards` and `suggestions` on every app open and persists if anything changed. Cleans up legacy duplicates from earlier builds at first launch after the upgrade. New entries use stable ids and won't re-accumulate.
+
+### Design call: Time-horizon All tab + Now-Feed urgency filter  (commit `2e35c99e`)
+
+**Curtis's read:** the feed was getting cluttered because everything-actionable was rendering in one stack regardless of horizon. Time-horizon grouping reduces overwhelm.
+
+**NEW `src/screens/AllScreen.tsx`** — three-section `SectionList`:
+- Today (urgency in `{now, today}`), This Week (`this_week`), Later (`someday`), in that order.
+- Each header shows count + expand/collapse chevron. Auto-collapse on first render if section has > 5 items.
+- Anti-shame empty states per spec ("Caught up. Nothing pulling at you right now.", "Nothing planned this week yet.", "No long-haul stuff on your plate.") rendered as section footer when expanded with zero items.
+- Reads `route.params.expandSection` so the NowFeed footer link can land here with the right section already opened (and the others collapsed).
+- Same source-aware action router as HomeScreen: tap primary → perform payload → `markDoneAcrossSources` by id-prefix.
+
+**`HomeScreen.tsx`:** `visibleCards` filtered to urgency in `{now, today}` only. Cards in `this_week` / `someday` no longer surface in Now. Added a footer text link below the feed: `"X this week · Y later →"`. Tapping it navigates to `All` with `expandSection` set so the user lands on the right horizon already opened. Renders only when there's actually something in those buckets.
+
+**`App.tsx`:** swapped `TasksScreen` → `AllScreen` for the All tab. Now-tab badge now counts only urgency in `{now, today}` (matches what NowFeed displays). `archivedCards` excluded from the count too.
+
+**`src/screens/TasksScreen.tsx`:** DELETED. The legacy 3-bucket layout (Today / Upcoming / Someday) is replaced by the AllScreen urgency-grouped SectionList. Task data still flows through the Zustand store unchanged.
+
+### Review pass
+
+3 general-purpose review subagents in parallel, one per commit. Per the Review Protocol's `code-reviewer`-or-`general-purpose` fallback (no `code-reviewer` agent type in this Claude Code install). Type and null-byte checks verified once by the parent and stamped into each prompt.
+
+| Bug      | Commit     | Verdict   | Notes                                                                |
+|----------|------------|-----------|----------------------------------------------------------------------|
+| A        | `b01b6930` | SHIP IT   | All 7 PASS. One cosmetic nit (stale comment about a removed helper) — fixed inline in this log commit alongside the cosmetic refresh. |
+| B        | `42321125` | SHIP IT   | All 7 PASS. dedupeById uses `>=` so equal-timestamp duplicates resolve deterministically (later-in-input wins). |
+| Design   | `2e35c99e` | SHIP IT   | All 11 sub-checks (a–k) PASS. SectionList native, route param wiring works, Anti-shame copy verbatim. |
+
+No standalone fixup commit needed for behavioral issues. The only fix bundled into this log commit is the cosmetic comment refresh in `actionCards.ts`.
+
+### Verification
+
+- `npx tsc --noEmit`: exit 0 after each commit.
+- Null-byte preflight: `app.json`, `package.json`, `eas.json`, `tsconfig.json` all 0 bytes.
+
+### Curtis's next move
+
+Reload Metro (or hot-reload — these are pure JS edits). Smoke test:
+
+1. **Voice capture → Gmail draft surface check.** Hold mic, say something like "draft an email to Marcus about Friday." Verify (a) the Gmail draft appears in your Drafts folder AND (b) an ActionCard appears in Now Feed with title set, context "Captured by voice • Gmail draft saved", and a "Got it" button. Tapping "Got it" should dismiss the card without creating a second draft.
+2. **Duplicate sanity.** Pull down on Now Feed to trigger a fresh smart scan. Compare against existing cards — same logical suggestions should NOT produce new entries. If any duplicates remain from pre-fix scans, they should collapse to one entry on the next app launch (hydrate's dedupe pass).
+3. **All tab horizon view.** Tap the All tab. Three sections (Today / This Week / Later). Section with > 5 cards starts collapsed; tap header to expand. Empty section shows the warm copy.
+4. **Footer link.** With at least one this-week or later card, look under the Now Feed for "X this week · Y later →". Tap it; should jump to All with the right section pre-expanded.
+5. **Voice urgency default.** New voice capture without an explicit date → card lands in Today section. Voice capture with explicit "next Monday" → card lands in This Week.
+
+If anything misbehaves, the existing log lines (`[FloatingMic][voice]`, `[TriageScreen.triage]`, etc.) will narrate the failure. Bug A's fix didn't need new converter logging — the bug was a deterministic projection issue, not a runtime mystery.
+
+---

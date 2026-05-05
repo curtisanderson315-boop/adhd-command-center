@@ -113,8 +113,9 @@ function statusFromCapture(s: CapturedAction['status']): ActionCardStatus {
 // Voice-capture urgency rule (design call from device-testing iteration 2):
 // "today" is the right default for a voice note captured NOW. Only override
 // if the AI extracted an explicit future date — then derive urgency from
-// proximity. Falls back to the legacy priority-based mapping if no date
-// AND no explicit "today" intent (rare — kept as defense in depth).
+// proximity. No date → today. (Replaced the old priority-based mapping; the
+// AI's `priority` field still drives the colored dot but no longer affects
+// which time horizon the card lands in.)
 function urgencyFromCapture(a: CapturedAction): ActionUrgency {
   if (a.date) {
     const t = new Date(a.date).getTime();
