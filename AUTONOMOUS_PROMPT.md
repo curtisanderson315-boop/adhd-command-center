@@ -347,6 +347,73 @@ Total estimated time: ~10 hrs. If you hit a wall, skip in this priority order: G
 
 ---
 
+## Review Protocol -- After Every Phase Commit (MANDATORY)
+
+Every phase ends with a commit. Before you move to the next phase, spawn a code-review subagent on that commit's diff. This is not optional. Skipping the review is the single most common way an autonomous session drifts -- one bad phase contaminates every phase after it.
+
+**Use the Task tool to spawn the subagent.** Prefer `subagent_type: "code-reviewer"` if your Claude Code install has it; fall back to `subagent_type: "general-purpose"` if not. Pass this exact prompt:
+
+```
+You are reviewing the diff for the most recent commit on this branch. 
+The commit implements Phase [LETTER] of the v2 ActionCard build for the 
+ADHD Command Center. The full spec is in AUTONOMOUS_PROMPT.md.
+
+Read these first:
+  1. AUTONOMOUS_PROMPT.md -- find the "Wired Integrations -- DO NOT 
+     REBUILD" table and the Phase [LETTER] task list
+  2. CLAUDE.md -- find the "NTFS Null-Byte Corruption" preflight 
+     command and the anti-shame copy rules under Design Vision v2
+  3. The diff: `git show --stat HEAD` then `git show HEAD` for full text
+
+Run these checks in order:
+
+1. HOOK PRESERVATION
+   For every row in the "Wired Integrations" table marked LIVE, open the 
+   file at the listed path and confirm the entry point is intact. If any 
+   LIVE entry was rewritten or deleted, that's a regression. FAIL.
+
+2. PHASE SPEC COMPLIANCE
+   Walk the numbered task list under Phase [LETTER] in AUTONOMOUS_PROMPT.md. 
+   For each task, confirm the diff actually delivered it. List any tasks 
+   that are partial or missing.
+
+3. TYPE CORRECTNESS
+   Run `npx tsc --noEmit`. Report every error verbatim.
+
+4. NULL-BYTE HYGIENE
+   Run the preflight from CLAUDE.md against app.json, package.json, 
+   eas.json, tsconfig.json. Report any file showing > 0 null bytes.
+
+5. ANTI-SHAME COPY
+   Grep the diff for user-facing strings (button labels, empty states, 
+   error toasts, notification bodies). Cross-check against the "Don't 
+   say / Do say" table. Any "Don't say" pattern present is a regression.
+
+6. ASYNCSTORAGE SCHEMA
+   Confirm no existing `@adhd:` key was renamed or removed. Confirm any 
+   new keys use the `@adhd:` prefix.
+
+7. STORE HYDRATION
+   Confirm App.tsx still calls `hydrate()` on mount and that no Zustand 
+   action was renamed in a way that breaks SuggestionsScreen / 
+   TasksScreen / TriageScreen / SettingsScreen consumers (if those 
+   screens still exist for the phase).
+
+Report format: one section per check (1-7), marked PASS or FAIL with one 
+sentence of explanation. End with one of two verdicts:
+  - SHIP IT  -- all checks pass
+  - FIX BEFORE ADVANCING -- list the specific fixes needed
+```
+
+**Acting on the review:**
+- If verdict is SHIP IT: log the review summary in PROGRESS_LOG.md under that phase, then start the next phase.
+- If verdict is FIX BEFORE ADVANCING: do the fixes. Either amend the commit (if not pushed) or add a follow-up `fixup: phase [letter] review fixes` commit. Then re-review until SHIP IT.
+
+**If you've already advanced multiple phases without a review:**
+You are in violation of the protocol. Stop forward progress, run the review on each unreviewed phase retroactively, accumulate the fixes into a single `fixup: retroactive phase reviews` commit, and only resume new phase work once every prior phase has a SHIP IT verdict logged in PROGRESS_LOG.md.
+
+---
+
 ## Decision Authority
 
 You are authorized to:
