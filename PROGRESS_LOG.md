@@ -346,3 +346,176 @@ The current build issues are from a new round of dependency changes (expo-audio,
 **Blockers needing attention:** None. If the OAuth flow now succeeds, both PIE and Triage will start producing real data on the device.
 
 ---
+
+## 2026-05-04 — expo-audio + expo-background-task native registration failure
+
+### Completed (diagnosis)
+- Confirmed OAuth fix ships and works on the new IPA: Metro logs show `[Settings] promptAsync result: {"type":"success", ..., "code":"..."}`. Google sign-in now actually round-trips.
+- Curtis reported voice recording still disabled. Investigated audioShim.ts catching `require('expo-audio')` errors, plus a parallel symptom: `[BackgroundPoll] Native background-task module not available — background polling disabled` firing on every app start.
+- Improved error logging in both `audioShim.ts` and `services/background.ts` (the original catch blocks swallowed the error message). After getting the dev client to reload off a fresh LAN-mode Metro, captured the actual error:
+  - `Cannot find native module 'ExpoAudio'`
+  - `Cannot find native module 'ExpoBackgroundTask'`
+  - Stack trace traces back to `requireNativeModule` in `expo-modules-core` returning null at runtime.
+- Walked the EAS build #3 (`c9d58be0`) logs: pods for both `ExpoAudio (1.1.1)` and `ExpoBackgroundTask (1.0.10)` **were** compiled and packaged (`libExpoAudio.a`, `libExpoBackgroundTask.a` show up in the link phase). So the native code is in the IPA.
+- Local `npx expo-modules-autolinking resolve --platform apple --json` lists both modules among the 25 autolinked Expo modules, with correct `swiftModuleNames` and `modules` entries. Local `generate-modules-provider --packages expo-audio expo-background-task expo-secure-store …` produces a valid `ExpoModulesProvider.swift` that imports `ExpoAudio`/`ExpoBackgroundTask` and lists `AudioModule.self`/`BackgroundTaskModule.self` in `getModuleClasses()`.
+- The EAS build log shows zero references to `ExpoModulesProvider` or `expo-modules-autolinking generate-modules-provider`, while clearly running React Native's New Architecture codegen (`RCTModuleProviders`, `RCTAppDependencyProvider`, `RCTThirdPartyComponentsProvider`). Strong evidence that during EAS prebuild, autolinking generated an `ExpoModulesProvider.swift` that excluded these two modules. Without provider entries, the static lib symbols got linker-stripped from the binary, so `requireNativeModule` finds nothing in `globalThis.expo.modules`, falls through both bridge proxy and TurboModuleRegistry lookups, and throws.
+- ExpoSecureStore loaded fine (no error from auth.ts at app start), so this is module-specific, not a systemic registration outage.
+- expo-doctor in build #3 had been flagging `Missing peer dependency: expo-asset Required by: expo-audio` with the note "Native module peer dependencies must be installed directly. Your app may crash outside of Expo Go without these dependencies." That's likely the root of why autolinking treated expo-audio differently from expo-secure-store.
+
+### Completed (fix attempt)
+- Promoted `expo-asset@~12.0.13` from a transitive dep to a direct dep in `package.json` (resolves doctor's warning, changes the project fingerprint, forces autolinking to treat expo-asset as a first-class peer for expo-audio).
+- Ran `npm install --legacy-peer-deps`; lock file picked up the new direct entry.
+- Committed `audioShim.ts` (which was previously an untracked working-tree orphan despite being imported by `CaptureBar.tsx` — risky; if anyone deleted the working tree the build would silently break).
+- Kept the improved error-message logging in audioShim.ts + background.ts so this class of issue is diagnosable next time without instrumentation rounds.
+- Commit: `7296052c fix: Promote expo-asset to direct dep; track audioShim, log require errors`.
+- Submitted EAS build with `--clear-cache` (build #1 of 3 this session). Build URL: https://expo.dev/accounts/ander315/projects/adhd-command-center/builds/fad4032e-a101-42a0-89d5-1ff231403dbd. **SUCCEEDED** (queue 84s, build 239s). New IPA: `https://expo.dev/artifacts/eas/wYshN3ALEedYm1sK3ubbsz.ipa`. Pending Curtis installing + reloading to validate the fix.
+
+### Decisions Made
+- **Decision:** Promoted `expo-asset` to a direct dep instead of pinning a different `expo-audio` version. **Reason:** 1.1.1 is the latest stable for SDK 54; nothing newer to upgrade to. The doctor warning specifically called out the missing direct dep with explicit "must be installed directly" framing, which matches the failure mode exactly.
+- **Decision:** Used `--clear-cache` on the EAS build. **Reason:** The hypothesis is that EAS's cached prebuild state from a previous run never regenerated `ExpoModulesProvider.swift` with these modules included. `--clear-cache` ensures a from-scratch prebuild and Pod install on the EAS worker.
+- **Decision:** Committed `audioShim.ts` rather than reverting it. **Reason:** It's already imported by `src/components/CaptureBar.tsx`, so the build was already depending on it — having it untracked just made the dependency invisible to git. Tracking it is strictly safer.
+- **Decision:** Kept the diagnostic logging in audioShim/background.ts even though we got the answer we needed. **Reason:** The previous catch blocks silently swallowed the error message, which is exactly what made this bug latent for so long. The improved log line is a few extra characters of code and a permanent diagnostic improvement.
+
+### Blockers
+- **Pending build #1 outcome.** If the new IPA still shows `Cannot find native module 'ExpoAudio'`, the next steps would be: (a) try adding `expo-audio` and `expo-background-task` explicitly to `app.json` `plugins`; (b) downgrade `react-native-reanimated` to 3.x to confirm/rule out new-arch interference; (c) bisect by removing modules until autolinking starts including the rest.
+
+### Next Session Should Start With
+- Once the queued build finishes: install the new IPA, reload the dev client, watch Metro for the `[audioShim]`/`[BackgroundPoll]` warnings. If they're gone — voice recording and background polling are unblocked. If they remain — surface the new build URL and we try the fallback options above.
+
+---
+
+## 2026-05-04 — Roll back expo-audio + expo-background-task → expo-av + expo-background-fetch
+
+### Completed
+- Confirmed the `--clear-cache` build did not fix native registration: `globalThis.expo.modules` on the running IPA still shows the old `ExpoBackgroundFetch` (carried in via expo-task-manager transitively) but neither `ExpoAudio` nor `ExpoBackgroundTask`. Diagnosis from previous session held; the autolinking provider regeneration didn't pick them up even with cache cleared. Per Curtis's instruction, stopped diagnosing and switched to a pragmatic rollback.
+- **Rolled back native modules:**
+  - `package.json`: removed `expo-audio ~1.1.1` + `expo-background-task ~1.0.10`; added `expo-av ~16.0.8` + `expo-background-fetch ~14.0.9`. `expo-task-manager ~14.0.9` and `expo-asset ~12.0.13` retained.
+  - `npm install --legacy-peer-deps` clean (`added 2, removed 2`). Verified: expo-av 16.0.8, expo-background-fetch 14.0.9, expo-task-manager 14.0.9 installed; expo-audio + expo-background-task gone.
+- **Rewrote `src/services/audioShim.ts` for expo-av:** Wraps the class-based `Audio.Recording` API in the same hook-shaped interface (`prepareToRecordAsync` / `record` / `stop` / `uri`) that `CaptureBar.tsx` already consumes — zero CaptureBar changes needed. Maps expo-audio's option names (`playsInSilentMode`, `allowsRecording`) to expo-av's iOS-suffixed equivalents (`playsInSilentModeIOS`, `allowsRecordingIOS`) inside `safeSetAudioMode` so call sites stay untouched. Native-availability detection + stub fallback preserved.
+- **Rewrote `src/services/background.ts` for expo-background-fetch:** Lazy-require swapped to `expo-background-fetch`. `BackgroundTaskResult.Success/Failed` swapped to `BackgroundFetchResult.NewData/NoData/Failed` (now also distinguishes "had work" from "idle run"). `registerTaskAsync` now passes `minimumInterval` in **seconds** (was minutes in expo-background-task), plus `stopOnTerminate: false` and `startOnBoot: true` to keep iOS running the task across app lifecycle events.
+- **`app.json`:** Removed `"expo-background-task"` from `plugins`. expo-background-fetch ships no config plugin in SDK 54, so instead added `"fetch"` and `"processing"` to `ios.infoPlist.UIBackgroundModes` manually (was just `"remote-notification"`).
+- Pre-flight null-byte scan: app.json / package.json / eas.json / tsconfig.json all 0 bytes ✅.
+- Committed as `3f947334 fix: Roll back to expo-av + expo-background-fetch for iOS native module fix`.
+- Submitted EAS development build (build #1 of 3 this session). **SUCCEEDED.** Build ID `d0acce0d-c564-4b3e-9f93-a3204373e0d3` at commit `3f947334`. Direct IPA: https://expo.dev/artifacts/eas/rLxPPtgYCthFyBLWryxYFD.ipa (the expo.dev/builds/<id> dashboard URL was returning "something went wrong" / 404 for Curtis at install time — transient Expo dashboard glitch. The IPA artifact link is the install path; open in Safari on iPhone).
+
+### Decisions Made
+- **Decision:** Roll back to the deprecated-but-working module pair (`expo-av` + `expo-background-fetch`) rather than continue diagnosing why autolinking dropped `ExpoAudio` / `ExpoBackgroundTask` from the provider. **Reason:** Curtis explicitly authorized stopping diagnosis and shipping the rollback. The newer modules are objectively better long-term but voice + background polling are unblocking-priority features and the older modules are still supported in SDK 54 (both at version 14.0.9 / 16.0.8).
+- **Decision:** Wrapped expo-av's class-based `Audio.Recording` API in a hook-shaped `useSafeAudioRecorder` rather than rewriting CaptureBar to call the class API directly. **Reason:** Keeps the CaptureBar component diff to zero; the shim was already the right abstraction layer for "swap out the audio backend without touching UI." Used `useRef` to hold the mutable recording instance, satisfying rules-of-hooks (the hook is the same hook with the same call order across renders).
+- **Decision:** Dropped the `"expo-background-fetch"` plugin entry from `app.json` rather than adding it back. **Reason:** SDK 54's expo-background-fetch package does not ship a config plugin file (unlike expo-background-task). Adding the plugin name would cause prebuild to fail with "config plugin not found." Adding `"fetch"` + `"processing"` to `UIBackgroundModes` manually achieves the same Info.plist outcome.
+- **Decision:** Use `BackgroundFetchResult.NewData` only when `runEmailPoll()` actually had emails to process (returns true), else `NoData`. **Reason:** iOS uses these signals to tune future scheduling — telling iOS "we found new data" when we didn't would waste battery on more frequent wake-ups.
+
+### Blockers
+- **Pending build #1 outcome.** If this build also fails to register `ExpoAV` / `ExpoBackgroundFetch` natively (unlikely since they were registering before the upgrade), the issue is broader than module choice and the next move would be to inspect `ios/ExpoModulesProvider.swift` directly on the EAS build worker logs.
+
+### Next Session Should Start With
+- Once the queued build finishes: install the new IPA, reload the dev client. Watch Metro logs for `[audioShim]` / `[BackgroundPoll]` warnings. If both `ExpoAV` and `ExpoBackgroundFetch` show up in `globalThis.expo.modules`, voice recording + background polling are unblocked end-to-end. If still missing, surface the new build URL and inspect the EAS prebuild / Pod install steps for autolinking output specific to these modules.
+
+---
+
+## 2026-05-04 — v2 Action Card architecture (Phases A–H complete, JS-only)
+
+Built the entire v2 "Action Card pivot" in one walk-away session — eight phases, eight commits, no EAS build required. The 5-tab PIE app becomes a 4-tab unified-surface app where every actionable thing (voice, email, smart suggestion, task, calendar) renders as the same `ActionCard` component, source-routed under the hood. All shipping via Metro reload on the existing IPA `9UDLqMM8gasvPY1utPC12.ipa` (or the rollback IPA `rLxPPtgYCthFyBLWryxYFD.ipa` from the prior session — same bundle id, both work).
+
+### Commits
+1. `14f5dc8b` — Phase A: action card primitive + source converters
+2. `540b5afb` — Phase B: now feed + floating capture button
+3. `78754602` — Phase C: memory-augmented action mining
+4. `8ffc2dd5` — Phase D: focus mode
+5. `a8eca907` — Phase E: activation coach
+6. `cb65ad1b` — Phase F: receipt index + drive mode + bundles
+7. `68bd88c4` — Phase G: warm tone copy audit
+8. (this commit) — Phase H: progress-log update
+
+### Built — files added
+- `src/components/ActionCard.tsx` — unified hero + compact card with swipe-to-snooze (right) and swipe-to-dismiss (left)
+- `src/components/FloatingMic.tsx` — persistent FAB (replaces CaptureBar), tap-to-stop in Drive Mode, press-and-hold otherwise
+- `src/components/FocusMode.tsx` — full-bleed black 25-min Pomodoro overlay with two-half-circle ring (no SVG)
+- `src/components/BundleStack.tsx` — focused-stack modal stepping through same-shape cards one at a time
+- `src/services/actionCards.ts` — converters + projectAllSources + mergeStoredOverlays + parseCardId + syncSourcesToActionCards + compareCards
+- `src/services/contextMiner.ts` — Memory-Augmented Action engine. Trigger-phrase regex + Sonnet call + local purchase index fast-path
+- `src/services/activationCoach.ts` — first-physical-step generator (Sonnet, max_tokens=80, temp=0.3, cap 5/run)
+- `src/services/receiptIndex.ts` — weekly Gmail order-confirmation indexer + findInPurchaseIndex (used by contextMiner)
+- `src/services/voiceTrigger.ts` — tiny pub/sub for "start recording NOW" requests from outside FloatingMic
+
+### Built — files modified (kept existing functions intact per integrations table)
+- `src/types/index.ts` — added ActionCard, ActionPayload, ActionUrgency, ActionCardStatus, PurchaseRecord
+- `src/store/index.ts` — added actionCards state + upsertCard/upsertCards/markCardStatus/dismissCard/snoozeCard/setCardFirstStep, persisted under `@adhd:actionCards`
+- `src/services/gmail.ts` — ADDED searchInboxEmails + getRecentInboxCached + refreshRecentInboxCache (existing fetchUnreadEmails / createDraft / archiveMessage / markAsRead untouched)
+- `src/services/amazon.ts` — ADDED buildAmazonProductUrl + openAmazonProduct (search-URL fallback preserved)
+- `src/services/siri.ts` — ADDED `drive_brain_dump` shortcut alongside the existing 3
+- `src/services/background.ts` — ADDED steps 3 (sync action cards) + 4 (activation coach) + 5 (receipt indexer) to the EXISTING TaskManager task; softened notification copy
+- `src/screens/HomeScreen.tsx` — rebuilt as NowFeed (hero + scrollable stack + greeting + bundle detection + Focus + Bundle modals)
+- `src/components/PriorityBadge.tsx` — anti-shame copy: 'Urgent' → 'Worth doing today', etc.
+- `src/screens/SettingsScreen.tsx` — softened error alerts
+- `src/screens/TriageScreen.tsx` — softened error alerts
+- `src/screens/TasksScreen.tsx` — softened empty state
+- `src/components/FloatingMic.tsx` — softened transcribe error
+- `App.tsx` — 5 tabs → 4 (Now / All / Inbox / Settings); FloatingMic rendered above the tab navigator; legacy notification routes (Triage, Suggestions) mapped forward to current tabs
+
+### Deleted
+- `src/components/CaptureBar.tsx` — content moved into FloatingMic
+- `src/screens/SuggestionsScreen.tsx` — content reframed as ActionCards in the Now Feed
+
+### Decisions (non-obvious)
+- **No EAS build this session.** `expo-speech ~14.0.8` was already in package.json (and shipping in the existing IPA — verified via grep on CaptureBar's import), so Drive Mode TTS needs no native rebuild. Phases A–G are pure JS/TypeScript. Logged as "no build needed" rather than burning a cap.
+- **Source-of-truth model.** Source-projected ActionCards (voice/task/email/smart) keep status on the SOURCE; the persisted `actionCards` overlay only holds enrichments (firstStep, snoozeUntil, dismissed-overlay). Manually-created cards from contextMiner have `ctx-` ids and live entirely in the overlay. parseCardId() routes dismiss/mark-done back to the right source-specific store action.
+- **Ring without SVG.** react-native-svg is not in deps; adding it would force a rebuild. The Focus Mode timer ring is two clipped half-circles with reanimated rotation transforms — same end result, no native dep added.
+- **Bundle threshold = 3, only across action-shaped kinds.** `reorder_amazon`, `create_draft`, `create_calendar`, `add_task` qualify. `mark_done` and `snooze` do not — clustering those would just be visual noise.
+- **Drive Mode = tap-to-stop with 30s auto-stop.** iOS doesn't expose continuous audio-level monitoring on expo-av, so the spec's "stop on 3s silence" is downgraded to a 30s ceiling + tap-to-stop. Logged as a TODO if real-time silence detection becomes available. The opening TTS prompt fires BEFORE recording starts so the prompt itself doesn't get captured.
+- **Activation coach reads & writes `@adhd:actionCards` directly.** Avoids needing the React store inside a background TaskManager invocation. `syncSourcesToActionCards()` runs first (background step 3) to ensure the projected cards are in the file before the coach walks the list.
+- **Receipt indexer search query.** Uses the spec's domain list plus tolerant subject fallback ("Your order" / "Order confirmation" / "Your Amazon order"). Window is `newer_than:180d` — long enough to cover seasonal reorders, short enough to keep the index small.
+- **Notification re-routing.** Legacy notifications scheduled before this build will still pass `route: 'Triage'` or `route: 'Suggestions'` in their data payload. App.tsx maps both to the new tab names ('Inbox' and 'Now') so they keep navigating correctly without a re-schedule.
+
+### Surprises
+- expo-speech was already in package.json — discovered while skimming deps. The session prompt assumed Phase F would force a build; in reality every phase shipped via Metro.
+- The pure ActionCard projection model meant I could ship the Now Feed without any data-migration logic. Existing captures, tasks, suggestions, and triaged emails just appeared as cards on first launch.
+
+### Verification
+- `npx tsc --noEmit` clean after every phase commit (8/8).
+- Null-byte preflight clean: app.json / package.json / eas.json / tsconfig.json all 0 bytes.
+
+### Hero flow status
+The trashcan flow from the spec:
+> "I need to buy a replacement piece for the trashcan. I bought it before, there's a receipt in my email."
+
+End-to-end coverage now in place:
+1. Voice → Whisper → text (live, untouched)
+2. `isContextHinted()` matches "buy", "again", "in my email" patterns → routes to contextMiner
+3. contextMiner consults the local PurchaseRecord index FIRST (sub-50ms, no tokens). If receipt indexer has run, the trashcan part is found immediately
+4. Synthesized ActionCard with `reorder_amazon` payload (asin if extracted, else search query)
+5. Card upserted to `@adhd:actionCards`, appears in Now Feed via the projection-merger
+6. Curtis taps "Reorder on Amazon" → `https://www.amazon.com/dp/[ASIN]` deep links into the native Amazon app
+
+Untested on device this session — Curtis needs to install the latest IPA and validate. Live transcript flow + contextMiner + receipt index can be smoke-tested without the Drive Mode shortcut by typing the trigger sentence into the manual text input.
+
+### Next Session Should Start With
+1. Reload Metro on the device — no rebuild needed:
+   ```
+   npx expo start --clear --tunnel
+   ```
+2. Smoke-test the Now Feed:
+   - Confirm the 4-tab navigator (Now / All / Inbox / Settings) shows up; the old Suggestions tab should be gone
+   - Confirm existing tasks, captures, suggestions, and triaged emails still appear (now as ActionCards in Now)
+   - Tap the floating mic at the bottom-right of any tab; confirm voice/text capture still works
+3. Trigger contextMiner manually:
+   - In the text fallback, type something like "I need to reorder Brita filters again, I bought them before"
+   - Should produce a card titled "Reorder Brita filters" with a "Reorder on Amazon" button (if a Brita receipt is in your inbox)
+4. Trigger Bundle:
+   - Add 3+ tasks via the mic ("buy paper towels", "buy dog food", "buy contact solution"). All three should cluster into a Bundle hero card on Now: "You have 3 things to buy. Want to knock them out?" Tapping opens BundleStack.
+5. Trigger Focus Mode:
+   - On any card, tap "Start" (only appears when firstStep is filled). The activation coach fills firstStep on cards >24h old in the background poll, so for testing: dismiss + restore a card, or wait a full background cycle. Quick way: any card you can tap "Start" on enters Focus Mode.
+6. Drive Mode:
+   - In iOS Settings → Siri & Search → ADHD Command Center, ensure "ARIA brain dump" is registered as a phrase (it gets donated on app launch). Say "Hey Siri, ARIA brain dump." App should open to Now and start recording within ~250ms with a TTS prompt "Drive mode. Speak now. I'll catch every thought." Tap mic to stop, or wait 30s for auto-stop.
+
+If anything breaks: capture the Metro console line, paste into a fresh Claude Code session, name the file/screen.
+
+### What WASN'T built
+- iOS-native silence detection for Drive Mode auto-stop (deferred — no API surface in expo-av)
+- Voice-controlled "next" / "done" inside Focus Mode (Phase D optional spec — flagged as TODO)
+- All-tab redesigned as a flat ActionCard list (TasksScreen still shows the legacy 3-bucket UI; rename only, no rebuild)
+- Inbox-tab ActionCard emission (TriageScreen unchanged in spirit per spec — its outputs DO appear as ActionCards in Now via the projection layer, but the screen itself still uses its own card UI for the in-Inbox triage flow)
+
+### Blockers needing Curtis's attention
+None. All authorization-gated steps (EAS build, Apple/Google portal changes) were not required.
+
+---
