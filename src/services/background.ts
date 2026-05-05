@@ -17,6 +17,8 @@ import { fetchUnreadEmails } from './gmail';
 import { triageEmail } from './ai';
 import { fetchUpcomingEvents } from './calendar';
 import { dedupKey, scanForSuggestions } from './smartScan';
+import { runActivationCoach } from './activationCoach';
+import { syncSourcesToActionCards } from './actionCards';
 
 export const ADHD_EMAIL_POLL = 'ADHD_EMAIL_POLL';
 export const NOTIFICATION_TAP_ROUTE = 'ADHD_NOTIFICATION_ROUTE';
@@ -108,6 +110,23 @@ async function runEmailPoll(): Promise<boolean> {
 
   // ── Step 2: Smart scan (PIE) — non-fatal if it fails ─────────────────────
   await runSmartScan(settings, rawEmails);
+
+  // ── Step 3: Sync source-projected cards into actionCards storage so the
+  //          activation coach (and any other consumer) sees a complete list.
+  try {
+    await syncSourcesToActionCards();
+  } catch (e) {
+    console.warn('[BackgroundPoll] syncSourcesToActionCards failed:', e);
+  }
+
+  // ── Step 4: Activation coach — fill firstStep on stalled cards. Bounded
+  //          to MAX_PER_RUN = 5, so token cost stays predictable.
+  try {
+    const filled = await runActivationCoach(settings.anthropicKey);
+    if (filled > 0) console.log(`[BackgroundPoll] activation coach filled ${filled} firstSteps`);
+  } catch (e) {
+    console.warn('[BackgroundPoll] activation coach failed:', e);
+  }
 
   return true;
 }

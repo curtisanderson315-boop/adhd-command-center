@@ -388,3 +388,67 @@ export function parseCardId(id: string): {
   if (id.startsWith('smart-')) return { kind: 'smart', sourceId: id.slice('smart-'.length) };
   return { kind: 'manual', sourceId: id };
 }
+
+// ─── Background sync ───────────────────────────────────────────────────────
+
+/**
+ * Read all source state from AsyncStorage, project to ActionCards, and
+ * upsert into @adhd:actionCards. Used by the background poll so the
+ * activation coach (and any other card-list consumer) sees a complete
+ * picture even when nothing has been persisted by user actions yet.
+ *
+ * Stays defensive: any storage read failure for an individual source
+ * degrades to an empty list for that source rather than aborting the sync.
+ */
+export async function syncSourcesToActionCards(): Promise<number> {
+  // Lazy import AsyncStorage to keep this module pure-import-safe
+  const AsyncStorage = (await import('@react-native-async-storage/async-storage'))
+    .default;
+
+  const [capturesRaw, tasksRaw, triageRaw, suggestionsRaw, storedRaw] = await Promise.all([
+    AsyncStorage.getItem('@adhd:captures').catch(() => null),
+    AsyncStorage.getItem('@adhd:tasks').catch(() => null),
+    AsyncStorage.getItem('@adhd:triageQueue').catch(() => null),
+    AsyncStorage.getItem('@adhd:suggestions').catch(() => null),
+    AsyncStorage.getItem('@adhd:actionCards').catch(() => null),
+  ]);
+
+  const captures: CapturedAction[] = capturesRaw ? safeParse(capturesRaw, []) : [];
+  const tasks: Task[] = tasksRaw ? safeParse(tasksRaw, []) : [];
+  const triageQueue: TriagedEmail[] = triageRaw ? safeParse(triageRaw, []) : [];
+  const suggestions: SmartSuggestion[] = suggestionsRaw ? safeParse(suggestionsRaw, []) : [];
+  const stored: ActionCard[] = storedRaw ? safeParse(storedRaw, []) : [];
+
+  const projected = projectAllSources({ captures, tasks, triageQueue, suggestions });
+  const projectedIds = new Set(projected.map((c) => c.id));
+  const storedById = new Map(stored.map((c) => [c.id, c]));
+
+  // Preserve enrichments (firstStep, snoozeUntil, dismissed status) when
+  // a stored entry exists for a projected card.
+  const merged: ActionCard[] = projected.map((p) => {
+    const s = storedById.get(p.id);
+    if (!s) return p;
+    return {
+      ...p,
+      firstStep: p.firstStep ?? s.firstStep ?? null,
+      ...(s.status === 'snoozed' || s.status === 'dismissed'
+        ? { status: s.status, snoozeUntil: s.snoozeUntil }
+        : {}),
+    };
+  });
+
+  // Keep manual-only stored cards (ctx-, bundle-, manual-) alongside.
+  const manualOnly = stored.filter((c) => !projectedIds.has(c.id));
+  const next = [...merged, ...manualOnly];
+
+  await AsyncStorage.setItem('@adhd:actionCards', JSON.stringify(next));
+  return next.length;
+}
+
+function safeParse<T>(raw: string, fallback: T): T {
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
